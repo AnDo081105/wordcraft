@@ -256,7 +256,6 @@ pub fn show(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) {
             button.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, crate::tl!("Paste Options")));
             app.paste_options.focus_ids.push(button.id);
             if button.on_hover_text(crate::tl!("Paste Options")).clicked() {
-                app.paste_options.focus = OPTIONS.iter().position(|o| o.0 == mode).unwrap_or(0);
                 let _ = app.run("ui.pasteOptions", json!({"value": !open}));
             }
             if open {
@@ -412,11 +411,7 @@ mod tests {
         assert_eq!(app.session.doc.plain_text(wordcraft_doc::StoryRef::Body), "rich");
     }
 
-    #[test]
-    fn clicking_menu_option_reformats_without_moving_the_caret() {
-        use egui_kittest::kittest::Queryable;
-        let mut app = app();
-        app.run("edit.paste", json!({"html":"<p><b>rich</b></p>", "text":"rich"})).unwrap();
+    fn harness(app: WordApp) -> egui_kittest::Harness<'static, WordApp> {
         let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1000.0, 700.0)).build_ui_state(
             |ui, app: &mut WordApp| {
                 let ctx = ui.ctx().clone();
@@ -428,6 +423,15 @@ mod tests {
         for _ in 0..6 {
             h.step();
         }
+        h
+    }
+
+    #[test]
+    fn clicking_menu_option_reformats_without_moving_the_caret() {
+        use egui_kittest::kittest::Queryable;
+        let mut app = app();
+        app.run("edit.paste", json!({"html":"<p><b>rich</b></p>", "text":"rich"})).unwrap();
+        let mut h = harness(app);
         h.get_by_label("Paste Options").click();
         h.step();
         h.step();
@@ -447,17 +451,7 @@ mod tests {
     fn typing_while_menu_is_open_dismisses_it_and_reaches_document() {
         let mut app = app();
         app.run("edit.paste", json!({"html":"<b>rich</b>", "text":"rich"})).unwrap();
-        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1000.0, 700.0)).build_ui_state(
-            |ui, app: &mut WordApp| {
-                let ctx = ui.ctx().clone();
-                app.logic(&ctx);
-                app.ui(ui);
-            },
-            app,
-        );
-        for _ in 0..6 {
-            h.step();
-        }
+        let mut h = harness(app);
         h.state_mut().run("ui.pasteOptions", json!({})).unwrap();
         h.step();
         h.step();
@@ -472,17 +466,7 @@ mod tests {
     fn scrolling_menu_offscreen_keeps_typing_in_document() {
         let mut app = app();
         app.run("edit.paste", json!({"html":"<b>rich</b>", "text":"rich"})).unwrap();
-        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1000.0, 700.0)).build_ui_state(
-            |ui, app: &mut WordApp| {
-                let ctx = ui.ctx().clone();
-                app.logic(&ctx);
-                app.ui(ui);
-            },
-            app,
-        );
-        for _ in 0..6 {
-            h.step();
-        }
+        let mut h = harness(app);
         h.state_mut().run("ui.pasteOptions", json!({})).unwrap();
         h.step();
         h.step();

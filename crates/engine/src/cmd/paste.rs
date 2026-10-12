@@ -439,20 +439,14 @@ fn paste_special(s: &mut Session, v: &Value) -> CmdResult {
     let mut r = match fmt {
         "text" => normal(s, v, "text")?,
         "formatted" => normal(s, &json!({}), "source")?,
-        "html" => save_source(
-            s,
-            PasteSource::Imported(Box::new(wordcraft_formats::html::import(&src))),
-            p::str(v, "text").map(str::to_string),
-            "source",
-            v,
-        )?,
-        _ => save_source(
-            s,
-            PasteSource::Imported(Box::new(wordcraft_formats::rtf::import(src.as_bytes()).map_err(|e| CmdError::Failed(format!("bad RTF: {e}")))?)),
-            p::str(v, "text").map(str::to_string),
-            "source",
-            v,
-        )?,
+        _ => {
+            let doc = if fmt == "html" {
+                wordcraft_formats::html::import(&src)
+            } else {
+                wordcraft_formats::rtf::import(src.as_bytes()).map_err(|e| CmdError::Failed(format!("bad RTF: {e}")))?
+            };
+            save_source(s, PasteSource::Imported(Box::new(doc)), p::str(v, "text").map(str::to_string), "source", v)?
+        }
     };
     r["pastedAs"] = json!(fmt);
     Ok(r)

@@ -33,8 +33,10 @@ pub fn specs() -> Vec<CommandSpec> {
         .pure(),
         CommandSpec::new("edit.cut", "Cut", "Home › Clipboard", cut).key("Mod+X").when(has_sel),
         CommandSpec::new("edit.copy", "Copy", "Home › Clipboard", copy).key("Mod+C").pure(),
-        CommandSpec::new("edit.paste", "Paste", "Home › Clipboard", paste).key("Mod+V").params(r#"{"text"?: string, "html"?: string, "rtf"?: string}"#),
-        CommandSpec::new("edit.pasteText", "Paste: Keep Text Only", "Home › Clipboard › Paste", paste_text)
+        CommandSpec::new("edit.paste", "Paste", "Home › Clipboard", |s, v| super::paste::normal(s, v, "source"))
+            .key("Mod+V")
+            .params(r#"{"text"?: string, "html"?: string, "rtf"?: string}"#),
+        CommandSpec::new("edit.pasteText", "Paste: Keep Text Only", "Home › Clipboard › Paste", |s, v| super::paste::normal(s, v, "text"))
             .params(r#"{"text"?: string, "html"?: string, "rtf"?: string}"#)
             .key("Mod+Shift+Alt+V"),
         CommandSpec::new("edit.pasteMerge", "Paste: Merge Formatting", "Home › Clipboard › Paste", |s, v| super::paste::normal(s, v, "merge"))
@@ -134,10 +136,6 @@ fn cut(s: &mut Session, v: &Value) -> CmdResult {
     }
     super::controls::restore_placeholder(s)?;
     Ok(r)
-}
-
-fn paste(s: &mut Session, v: &Value) -> CmdResult {
-    super::paste::normal(s, v, "source")
 }
 
 /// Most items the Clipboard pane keeps.
@@ -253,7 +251,7 @@ fn clip_index(s: &Session, v: &Value) -> Result<usize, CmdError> {
 /// Paste a collected item through the normal paste path. The clipboard itself stays as it was.
 fn paste_clip(s: &mut Session, f: Fragment) -> CmdResult {
     let saved = s.clipboard.replace(f);
-    let r = paste(s, &json!({}));
+    let r = super::paste::normal(s, &json!({}), "source");
     s.clipboard = saved;
     r
 }
@@ -272,10 +270,6 @@ fn paste_all_clips(s: &mut Session, _: &Value) -> CmdResult {
         r = paste_clip(s, f)?;
     }
     Ok(r)
-}
-
-fn paste_text(s: &mut Session, v: &Value) -> CmdResult {
-    super::paste::normal(s, v, "text")
 }
 
 /// One match: its range and, when asked for, the Replace with text filled in for it.
