@@ -231,7 +231,7 @@ pub fn show(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) {
         return;
     }
     let open = app.paste_options.open;
-    let size = if open { egui::vec2(158.0, 108.0) } else { egui::vec2(104.0, 30.0) };
+    let size = egui::vec2(92.0, 30.0);
     let Some(rect) = anchor_rect(caret, height, size, viewport) else {
         hide_menu(app, ctx);
         return;
@@ -240,11 +240,12 @@ pub fn show(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) {
     let mode = app.session.last_paste.as_ref().map(|p| p.mode).unwrap_or("source");
     let rich = app.session.last_paste.as_ref().is_some_and(|p| p.rich);
     app.paste_options.focus_ids.clear();
-    app.paste_options.rect = Some(rect);
-    egui::Area::new(egui::Id::new("wc_paste_options")).order(egui::Order::Foreground).fixed_pos(rect.min).movable(false).show(ctx, |ui| {
-        ui.set_width(size.x);
-        ui.set_clip_rect(rect);
-        egui::Frame::new().fill(t.menu).stroke(egui::Stroke::new(1.0, t.border_strong)).corner_radius(4).inner_margin(5).show(ui, |ui| {
+    let button = egui::Area::new(egui::Id::new("wc_paste_options"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(rect.min)
+        .movable(false)
+        .constrain_to(viewport)
+        .show(ctx, |ui| {
             let button = crate::widgets::icon_text_button(ui, "paste", "(Ctrl)   ", crate::theme::regular(11.5));
             icons::paint(
                 ui.painter(),
@@ -255,54 +256,80 @@ pub fn show(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) {
             );
             button.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, crate::tl!("Paste Options")));
             app.paste_options.focus_ids.push(button.id);
+            let button_rect = button.rect;
             if button.on_hover_text(crate::tl!("Paste Options")).clicked() {
                 let _ = app.run("ui.pasteOptions", json!({"value": !open}));
             }
-            if open {
-                ui.separator();
-                ui.label(egui::RichText::new(crate::tl!("Paste Options")).font(crate::theme::semibold(12.0)));
-                ui.horizontal(|ui| {
-                    for (i, (value, label, icon)) in OPTIONS.into_iter().enumerate() {
-                        let enabled = rich || value == "text";
-                        ui.add_enabled_ui(enabled, |ui| {
-                            let (r, response) = ui.allocate_exact_size(egui::vec2(40.0, 36.0), egui::Sense::click());
-                            app.paste_options.focus_ids.push(response.id);
-                            crate::widgets::bg(ui, r, &response, mode == value, &t);
-                            let color = if enabled { t.icon } else { t.text_disabled };
-                            icons::paint(
-                                ui.painter(),
-                                Rect::from_center_size(r.center(), egui::vec2(24.0, 24.0)),
-                                icon,
-                                color,
-                                if enabled { t.accent } else { color },
-                            );
-                            response.widget_info(|| {
-                                egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, enabled, mode == value, crate::tl!(label))
-                            });
-                            if app.paste_options.focus == i {
-                                if app.paste_options.focus_pending && enabled {
-                                    response.request_focus();
-                                    app.paste_options.focus_pending = false;
-                                }
-                                ui.painter().rect_stroke(r.shrink(2.0), 3, egui::Stroke::new(1.0, t.accent), egui::StrokeKind::Inside);
-                            }
-                            if response.has_focus() {
-                                ui.memory_mut(|m| {
-                                    m.set_focus_lock_filter(
-                                        response.id,
-                                        egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true },
-                                    )
+            button_rect
+        })
+        .inner;
+    app.paste_options.rect = Some(button);
+    if app.paste_options.open {
+        let menu_id = egui::Id::new("wc_paste_options_menu");
+        let menu_size = egui::containers::AreaState::load(ctx, menu_id).and_then(|s| s.size).unwrap_or(egui::vec2(110.0, 54.0));
+        let below = button.bottom() + 4.0 + menu_size.y <= viewport.bottom();
+        let position = egui::pos2(button.left(), if below { button.bottom() + 4.0 } else { button.top() - 4.0 });
+        let menu = egui::Area::new(menu_id)
+            .order(egui::Order::Foreground)
+            .pivot(if below { egui::Align2::LEFT_TOP } else { egui::Align2::LEFT_BOTTOM })
+            .fixed_pos(position)
+            .default_size(menu_size)
+            .movable(false)
+            .constrain_to(viewport)
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(t.menu)
+                    .stroke(egui::Stroke::new(1.0, t.border_strong))
+                    .corner_radius(0)
+                    .inner_margin(2)
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new(crate::tl!("Paste Options")).font(crate::theme::semibold(12.0)));
+                        ui.horizontal(|ui| {
+                            for (i, (value, label, icon)) in OPTIONS.into_iter().enumerate() {
+                                let enabled = rich || value == "text";
+                                ui.add_enabled_ui(enabled, |ui| {
+                                    let (r, response) = ui.allocate_exact_size(egui::vec2(27.0, 23.0), egui::Sense::click());
+                                    app.paste_options.focus_ids.push(response.id);
+                                    crate::widgets::bg(ui, r, &response, mode == value, &t);
+                                    let color = if enabled { t.icon } else { t.text_disabled };
+                                    icons::paint(
+                                        ui.painter(),
+                                        Rect::from_center_size(r.center(), egui::vec2(20.0, 20.0)),
+                                        icon,
+                                        color,
+                                        if enabled { t.accent } else { color },
+                                    );
+                                    response.widget_info(|| {
+                                        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, enabled, mode == value, crate::tl!(label))
+                                    });
+                                    if app.paste_options.focus == i {
+                                        if app.paste_options.focus_pending && enabled {
+                                            response.request_focus();
+                                            app.paste_options.focus_pending = false;
+                                        }
+                                        ui.painter().rect_stroke(r.shrink(2.0), 3, egui::Stroke::new(1.0, t.accent), egui::StrokeKind::Inside);
+                                    }
+                                    if response.has_focus() {
+                                        ui.memory_mut(|m| {
+                                            m.set_focus_lock_filter(
+                                                response.id,
+                                                egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true },
+                                            )
+                                        });
+                                    }
+                                    if response.on_hover_text(crate::tl!(label)).clicked() {
+                                        choose(app, value);
+                                    }
                                 });
                             }
-                            if response.on_hover_text(crate::tl!(label)).clicked() {
-                                choose(app, value);
-                            }
                         });
-                    }
-                });
-            }
-        });
-    });
+                    })
+                    .response
+                    .rect
+            })
+            .inner;
+        app.paste_options.rect = Some(button.union(menu));
+    }
 }
 
 #[cfg(test)]
@@ -432,9 +459,14 @@ mod tests {
         let mut app = app();
         app.run("edit.paste", json!({"html":"<p><b>rich</b></p>", "text":"rich"})).unwrap();
         let mut h = harness(app);
+        let button = egui::containers::AreaState::load(&h.ctx, egui::Id::new("wc_paste_options")).unwrap().rect();
         h.get_by_label("Paste Options").click();
         h.step();
         h.step();
+        assert_eq!(egui::containers::AreaState::load(&h.ctx, egui::Id::new("wc_paste_options")).unwrap().rect(), button);
+        let menu = egui::containers::AreaState::load(&h.ctx, egui::Id::new("wc_paste_options_menu")).unwrap().rect();
+        assert!(menu.top() >= button.bottom() + 3.0);
+        assert!(h.state().paste_options.rect.unwrap().contains_rect(menu));
         h.get_by_label("Keep Text Only").click();
         h.step();
         assert_eq!(h.state().session.last_paste.as_ref().unwrap().mode, "text");
@@ -445,6 +477,26 @@ mod tests {
         h.state_mut().run("edit.undo", json!({})).unwrap();
         h.state_mut().run("edit.undo", json!({})).unwrap();
         assert_eq!(h.state().session.doc.plain_text(wordcraft_doc::StoryRef::Body), "");
+    }
+
+    #[test]
+    fn dropdown_flips_above_without_moving_the_button() {
+        let mut app = app();
+        app.run("edit.paste", json!({"html":"<b>rich</b>", "text":"rich"})).unwrap();
+        let mut h = harness(app);
+        let (caret, height) = crate::canvas::caret_screen(h.state_mut()).unwrap();
+        let viewport = Rect::from_min_max(Pos2::ZERO, egui::pos2(1000.0, caret.y + height + 40.0));
+        let ctx = h.ctx.clone();
+        ctx.run_ui(Default::default(), |ui| show(h.state_mut(), ui.ctx(), viewport)).drop_without_applying_deltas();
+        let button = egui::containers::AreaState::load(&ctx, egui::Id::new("wc_paste_options")).unwrap().rect();
+        h.state_mut().run("ui.pasteOptions", json!({})).unwrap();
+        for _ in 0..3 {
+            ctx.run_ui(Default::default(), |ui| show(h.state_mut(), ui.ctx(), viewport)).drop_without_applying_deltas();
+        }
+        assert_eq!(egui::containers::AreaState::load(&ctx, egui::Id::new("wc_paste_options")).unwrap().rect(), button);
+        let menu = egui::containers::AreaState::load(&ctx, egui::Id::new("wc_paste_options_menu")).unwrap().rect();
+        assert!(menu.bottom() <= button.top() - 3.0);
+        assert!(viewport.contains_rect(menu));
     }
 
     #[test]
