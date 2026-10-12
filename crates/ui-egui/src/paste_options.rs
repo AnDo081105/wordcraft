@@ -246,7 +246,8 @@ pub fn show(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) {
         .movable(false)
         .constrain_to(viewport)
         .show(ctx, |ui| {
-            let button = crate::widgets::icon_text_button(ui, "paste", "(Ctrl)   ", crate::theme::regular(11.5));
+            ui.visuals_mut().widgets.inactive.corner_radius = egui::CornerRadius::ZERO;
+            let button = crate::widgets::icon_text_button(ui, "paste", "(Ctrl)  ", crate::theme::regular(11.5));
             icons::paint(
                 ui.painter(),
                 Rect::from_center_size(egui::pos2(button.rect.right() - 6.0, button.rect.center().y), egui::vec2(9.0, 9.0)),
@@ -267,8 +268,8 @@ pub fn show(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) {
     if app.paste_options.open {
         let menu_id = egui::Id::new("wc_paste_options_menu");
         let menu_size = egui::containers::AreaState::load(ctx, menu_id).and_then(|s| s.size).unwrap_or(egui::vec2(110.0, 54.0));
-        let below = button.bottom() + 4.0 + menu_size.y <= viewport.bottom();
-        let position = egui::pos2(button.left(), if below { button.bottom() + 4.0 } else { button.top() - 4.0 });
+        let below = button.bottom() + 0.0 + menu_size.y <= viewport.bottom();
+        let position = egui::pos2(button.left(), if below { button.bottom() + 0.0 } else { button.top() - 0.0 });
         let menu = egui::Area::new(menu_id)
             .order(egui::Order::Foreground)
             .pivot(if below { egui::Align2::LEFT_TOP } else { egui::Align2::LEFT_BOTTOM })
@@ -280,21 +281,27 @@ pub fn show(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) {
                 egui::Frame::new()
                     .fill(t.menu)
                     .stroke(egui::Stroke::new(1.0, t.border_strong))
-                    .corner_radius(0)
-                    .inner_margin(2)
+                    .corner_radius(4)
+                    .inner_margin(egui::Margin {
+                        left: 2,
+                        right: 20,
+                        top: 2,
+                        bottom: 2,
+                    })
                     .show(ui, |ui| {
                         ui.label(egui::RichText::new(crate::tl!("Paste Options")).font(crate::theme::semibold(12.0)));
                         ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 1.0;
                             for (i, (value, label, icon)) in OPTIONS.into_iter().enumerate() {
                                 let enabled = rich || value == "text";
                                 ui.add_enabled_ui(enabled, |ui| {
-                                    let (r, response) = ui.allocate_exact_size(egui::vec2(27.0, 23.0), egui::Sense::click());
+                                    let (r, response) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::click());
                                     app.paste_options.focus_ids.push(response.id);
                                     crate::widgets::bg(ui, r, &response, mode == value, &t);
                                     let color = if enabled { t.icon } else { t.text_disabled };
                                     icons::paint(
                                         ui.painter(),
-                                        Rect::from_center_size(r.center(), egui::vec2(20.0, 20.0)),
+                                        Rect::from_center_size(r.center(), egui::vec2(23.0, 23.0)),
                                         icon,
                                         color,
                                         if enabled { t.accent } else { color },
