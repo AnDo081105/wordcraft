@@ -233,6 +233,7 @@ pub struct Session {
     pub path: Option<std::path::PathBuf>,
     pub dirty: bool,
     pub clipboard: Option<Fragment>,
+    pub last_paste: Option<crate::PasteState>,
     /// A tracked cut the next paste can turn into a move (see `cmd::moves`).
     pub pending_move: Option<crate::cmd::moves::PendingMove>,
     /// Plain text mirror of the clipboard (for the system clipboard).
@@ -423,6 +424,7 @@ impl Session {
             path: None,
             dirty: false,
             clipboard: None,
+            last_paste: None,
             pending_move: None,
             clipboard_text: String::new(),
             clip_history: Default::default(),
@@ -510,6 +512,13 @@ impl Session {
     /// Document revision (bumped by every change).
     pub fn rev(&self) -> u64 {
         self.rev
+    }
+    /// Whether the paste still belongs to the unchanged insertion point/document.
+    pub fn paste_options_valid(&self) -> bool {
+        self.last_paste.as_ref().is_some_and(|p| p.rev == self.rev && p.document_id == self.document_id && p.final_sel == self.sel)
+    }
+    pub fn dismiss_paste(&mut self) {
+        self.last_paste = None;
     }
     /// Which document is open (see `document_id`): lets a caller tell an edit from a replacement.
     pub fn document_id(&self) -> u64 {
@@ -676,6 +685,7 @@ impl Session {
         self.history.iter().rev().map(|u| u.label.clone()).collect()
     }
     pub fn undo(&mut self) -> bool {
+        self.dismiss_paste();
         self.typing_open = false;
         let Some(u) = self.history.pop().map(Arc::unwrap_or_clone) else { return false };
         let cur = Undo {
@@ -694,6 +704,7 @@ impl Session {
         next.is_some_and(|u| crate::cmd::protect::protection_lifted(&self.doc, &u.doc))
     }
     pub fn redo(&mut self) -> bool {
+        self.dismiss_paste();
         self.typing_open = false;
         let Some(u) = self.redo.pop().map(Arc::unwrap_or_clone) else { return false };
         let cur = Undo {
@@ -708,6 +719,7 @@ impl Session {
     }
     /// Drop history (after open / new).
     pub fn reset_history(&mut self) {
+        self.dismiss_paste();
         self.history.clear();
         self.redo.clear();
         self.typing_open = false;
@@ -759,6 +771,7 @@ impl Session {
             path: _,
             dirty,
             clipboard: _,
+            last_paste: _,
             // Like the clipboard: what the next paste can make a move of.
             pending_move: _,
             clipboard_text: _,
@@ -826,6 +839,7 @@ impl Session {
     /// selection or undo/redo (undo steps the limit pushed out meanwhile come back). The layout
     /// is recomputed.
     pub fn restore(&mut self, snap: EditSnapshot) {
+        self.dismiss_paste();
         let EditSnapshot { doc, sel, history_len, evicted, head, redo, typing_open, join_next, dirty } = snap;
         let gone = usize::try_from(self.undo_evicted.saturating_sub(evicted)).unwrap_or(usize::MAX);
         if gone > 0 {
@@ -872,6 +886,9 @@ impl Session {
         let join = std::mem::take(&mut self.join_next);
         let reg = self.registry.clone();
         let Some(spec) = reg.get(id) else { return Err(CmdError::Unknown(id.to_string())) };
+        if self.last_paste.is_some() && !self.paste_options_valid() {
+            self.dismiss_paste();
+        }
         if let Some(why) = (spec.enabled)(self) {
             return Err(CmdError::Disabled(format!("{id}: {why}")));
         }
@@ -920,11 +937,14 @@ impl Session {
         } else {
             None
         };
+        let pending_before = self.pending.clone();
+        let move_before = self.pending_move.clone();
+        let paste_before = self.last_paste.clone();
         let typing = spec.id == "text.insert" || spec.id == "equation.type";
         if spec.mutates && !typing {
             self.typing_open = false;
         }
-        if spec.mutates {
+        if spec.mutates && id != "edit.pasteOptions" {
             let label = if typing { "Typing" } else { spec.label };
             if !join || self.history.is_empty() {
                 self.checkpoint(label);
@@ -935,7 +955,9 @@ impl Session {
             self.typing_open = false;
         }
         // Only the paste right after a tracked cut makes it a move.
-        if (spec.mutates || matches!(id, "edit.undo" | "edit.redo")) && !matches!(id, "edit.cut" | "edit.paste" | "edit.pasteSpecial") {
+        if (spec.mutates || matches!(id, "edit.undo" | "edit.redo"))
+            && !matches!(id, "edit.cut" | "edit.paste" | "edit.pasteSpecial" | "edit.pasteOptions")
+        {
             self.pending_move = None;
         }
         let sel_before = self.sel.clone();
@@ -983,12 +1005,36 @@ impl Session {
                 }
                 // Outline view: collapsed headings follow edits; the caret stays where it shows.
                 crate::cmd::outline::after_command(self, &sel_before);
+                if matches!(id, "edit.paste" | "edit.pasteText" | "edit.pasteMerge" | "edit.pasteOptions" | "edit.pasteClipboardItem")
+                    || (id == "edit.pasteSpecial" && params.get("as").is_some())
+                {
+                    if let Some(paste) = &mut self.last_paste {
+                        if id != "edit.pasteOptions"
+                            && let Some((doc, sel, _, _, _, _, column)) = &before_doc
+                        {
+                            paste.before_doc = doc.clone();
+                            paste.before_sel = sel.clone();
+                            paste.before_pending = pending_before.clone();
+                            paste.before_column = column.clone();
+                        }
+                        paste.rev = self.rev;
+                        paste.document_id = self.document_id;
+                        paste.final_sel = self.sel.clone();
+                    }
+                } else if spec.mutates || self.sel != sel_before || matches!(id, "edit.undo" | "edit.redo") {
+                    self.dismiss_paste();
+                }
                 // Extra selected objects last until something else is edited or selected.
                 if !matches!(id, "select.addObject" | "arrange.ungroup") && (spec.mutates || self.sel != sel_before) {
                     self.also_selected.clear();
                 }
             }
             Err(e) => {
+                if spec.mutates {
+                    self.pending = pending_before;
+                    self.pending_move = move_before;
+                    self.last_paste = paste_before;
+                }
                 if let Some((d, s, h, r, t, ev, c)) = before_doc {
                     self.doc = d;
                     self.sel = s;

@@ -81,6 +81,23 @@ pub fn paint(p: &Painter, r: Rect, name: &str, c: Color32, accent: Color32) {
     let orange = Color32::from_rgb(0xE0, 0x7B, 0x1F);
     match name {
         // Clipboard
+        "paste_source" => {
+            pen.page(3.0, 2.0, 14.0, 18.0);
+            pen.line(&[(6.0, 7.0), (11.0, 7.0)]);
+            pen.line(&[(6.0, 10.0), (11.0, 10.0)]);
+            pen.circle(15.0, 14.0, 3.0, a);
+            pen.line(&[(15.0, 12.0), (15.0, 16.0)]);
+        }
+        "paste_merge" => {
+            pen.line(&[(3.0, 4.0), (7.0, 4.0), (11.0, 10.0), (17.0, 10.0)]);
+            pen.line(&[(3.0, 16.0), (7.0, 16.0), (11.0, 10.0)]);
+            pen.line(&[(14.0, 7.0), (17.0, 10.0), (14.0, 13.0)]);
+        }
+        "paste_text" => {
+            pen.line(&[(4.0, 4.0), (16.0, 4.0)]);
+            pen.line(&[(10.0, 4.0), (10.0, 17.0)]);
+            pen.line(&[(7.0, 17.0), (13.0, 17.0)]);
+        }
         "paste" => {
             pen.rect(4.0, 3.5, 14.0, 17.0, c);
             pen.frect(7.0, 2.0, 11.0, 5.0, a);

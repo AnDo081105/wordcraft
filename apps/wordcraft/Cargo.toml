@@ -27,6 +27,10 @@ log = { workspace = true }
 # Icon + VERSIONINFO for wordcraft.exe; build.rs only uses it when the target is Windows.
 winresource = "0.1"
 
+[target.'cfg(windows)'.dependencies]
+# Already used by arboard; raw bounded reads avoid allocating from untrusted format sizes (#820).
+clipboard-win = "=5.4.1"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # Finder double-click, Open With, Dock drops and `open -a WordCraft letter.docx` arrive as a
 # kAEOpenDocuments Apple event, which winit 0.30 doesn't handle (#27). This audited crate (also used

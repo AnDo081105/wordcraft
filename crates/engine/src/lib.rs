@@ -22,6 +22,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
+pub use cmd::paste::PasteState;
 pub use io::Password;
 pub use keymap::KeyMap;
 pub use ribbon::RibbonLayout;

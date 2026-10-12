@@ -935,6 +935,7 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
     {
         crate::mini_toolbar::show(app, ui.ctx(), sel, area);
     }
+    crate::paste_options::show(app, ui.ctx(), area);
 }
 
 /// Comment balloons in the markup area right of each page, joined to their anchors, with each

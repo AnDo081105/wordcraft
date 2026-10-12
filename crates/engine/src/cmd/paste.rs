@@ -13,7 +13,333 @@ use wordcraft_doc::edit::Fragment;
 use wordcraft_doc::{Block, Document, Paragraph};
 
 use super::{delete_selection, sel_result};
-use crate::{CmdError, CmdResult, CommandSpec, Selection, Session, p};
+use crate::{CmdError, CmdResult, ColumnBlock, CommandSpec, Selection, Session, p};
+
+/// The most recent paste, retained independently of subsequent clipboard changes.
+#[derive(Clone, Debug)]
+pub struct PasteState {
+    pub mode: &'static str,
+    pub rich: bool,
+    source: Arc<PasteSource>,
+    text: Option<String>,
+    pub(crate) before_doc: Document,
+    pub(crate) before_sel: Selection,
+    pub(crate) before_pending: Option<wordcraft_doc::props::CharProps>,
+    pub(crate) before_column: Option<ColumnBlock>,
+    before_move: Option<super::moves::PendingMove>,
+    pub(crate) rev: u64,
+    pub(crate) document_id: u64,
+    pub(crate) final_sel: Selection,
+}
+
+#[derive(Clone, Debug)]
+enum PasteSource {
+    Internal(Fragment),
+    Imported(Box<Document>),
+    Text(String),
+}
+
+/// Reject oversized/deep internal copies before cloning or flattening them.
+fn check_fragment(f: &Fragment) -> Result<(), CmdError> {
+    fn block(b: &Block, depth: usize, bytes: &mut usize, nodes: &mut usize) -> Result<(), CmdError> {
+        *nodes = nodes.saturating_add(1);
+        if depth > 16 || *nodes > 100_000 {
+            return Err(CmdError::Params("clipboard structure exceeds the paste limit".into()));
+        }
+        match b {
+            Block::Para(p) => {
+                *bytes = bytes
+                    .saturating_add(p.text.len())
+                    .saturating_add(p.runs.len().saturating_mul(256))
+                    .saturating_add(p.objects.len().saturating_mul(256));
+                if *bytes > MAX_PASTE_BYTES {
+                    return Err(CmdError::Params("clipboard content exceeds the paste limit".into()));
+                }
+            }
+            Block::Table(t) => {
+                for cell in t.rows.iter().flat_map(|r| &r.cells) {
+                    for b in &cell.blocks {
+                        block(b, depth + 1, bytes, nodes)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    let (mut bytes, mut nodes) = (0, 0);
+    for b in &f.blocks {
+        block(b, 0, &mut bytes, &mut nodes)?;
+    }
+    for part in f.parts.values() {
+        for b in &part.blocks {
+            block(b, 0, &mut bytes, &mut nodes)?;
+        }
+    }
+    Ok(())
+}
+
+fn normal_source(s: &Session, v: &Value) -> Result<(PasteSource, bool), CmdError> {
+    for k in ["text", "html", "rtf"] {
+        if p::str(v, k).is_some_and(|t| t.len() > MAX_PASTE_BYTES) {
+            return Err(CmdError::Params(format!("`{k}` is larger than {} MB", MAX_PASTE_BYTES >> 20)));
+        }
+    }
+    if let Some(f) = &s.clipboard {
+        let check = check_fragment(f);
+        if p::str(v, "text").is_none() && p::str(v, "html").is_none() && p::str(v, "rtf").is_none() {
+            check?;
+            return Ok((PasteSource::Internal(f.clone()), false));
+        }
+        let own = match p::str(v, "text") {
+            Some(t) if check.is_ok() => f.plain_text() == t.replace("\r\n", "\n"),
+            _ => false,
+        };
+        if own {
+            return Ok((PasteSource::Internal(f.clone()), false));
+        }
+    }
+    let mut fallback = false;
+    if let Some(html) = p::str(v, "html") {
+        let doc = wordcraft_formats::html::import(html);
+        if !doc.plain_text(wordcraft_doc::StoryRef::Body).is_empty() {
+            return Ok((PasteSource::Imported(Box::new(doc)), false));
+        }
+        fallback = true;
+    }
+    if let Some(rtf) = p::str(v, "rtf") {
+        if let Ok(doc) = wordcraft_formats::rtf::import(rtf.as_bytes())
+            && !doc.plain_text(wordcraft_doc::StoryRef::Body).is_empty()
+        {
+            return Ok((PasteSource::Imported(Box::new(doc)), fallback));
+        }
+        fallback = true;
+    }
+    if let Some(t) = p::str(v, "text") {
+        return Ok((PasteSource::Text(t.replace("\r\n", "\n")), fallback));
+    }
+    Err(CmdError::Failed(if fallback { "the rich clipboard content could not be read" } else { "the clipboard is empty" }.into()))
+}
+
+/// Normal source, merge and text paste all retain the same original source.
+pub fn normal(s: &mut Session, v: &Value, mode: &'static str) -> CmdResult {
+    let (source, fallback) = normal_source(s, v)?;
+    let result = save_source(s, source, p::str(v, "text").map(|t| t.replace("\r\n", "\n")), mode, v)?;
+    if fallback {
+        s.status = "Rich clipboard content could not be read; pasted an available fallback.".into();
+    }
+    Ok(result)
+}
+
+fn save_source(s: &mut Session, source: PasteSource, text: Option<String>, mode: &'static str, v: &Value) -> CmdResult {
+    let image_only = match &source {
+        PasteSource::Internal(f) => f.parts.is_empty() && images_only(f.blocks.iter(), &s.doc.styles),
+        PasteSource::Imported(d) => d.parts.is_empty() && images_only(d.body.iter().map(AsRef::as_ref), &d.styles),
+        PasteSource::Text(_) => false,
+    };
+    if image_only {
+        s.dismiss_paste();
+        if mode == "text" {
+            let text = text.unwrap_or_else(|| match &source {
+                PasteSource::Internal(f) => f.plain_text(),
+                PasteSource::Imported(d) => d.plain_text(wordcraft_doc::StoryRef::Body),
+                PasteSource::Text(t) => t.clone(),
+            });
+            super::paste_text(s, &text.replace(wordcraft_doc::para::OBJ, "").replace("\r\n", "\n").replace('\n', "\r"))?;
+        } else {
+            let frag = match source {
+                PasteSource::Internal(f) => f,
+                PasteSource::Imported(d) => adopt(s, *d),
+                PasteSource::Text(t) => Fragment::from_text(&t),
+            };
+            insert(s, frag)?;
+        }
+        return sel_result(s);
+    }
+    let rich = !matches!(source, PasteSource::Text(_));
+    s.last_paste = Some(PasteState {
+        mode: if rich { mode } else { "text" },
+        rich,
+        source: Arc::new(source),
+        text: text.map(|t| t.replace("\r\n", "\n")),
+        before_doc: s.doc.clone(),
+        before_sel: s.sel.clone(),
+        before_pending: s.pending.clone(),
+        before_column: s.column.clone(),
+        before_move: s.pending_move.clone(),
+        rev: s.rev(),
+        document_id: s.document_id(),
+        final_sel: s.sel.clone(),
+    });
+    insert_saved(s, v)
+}
+
+fn images_only<'a>(blocks: impl Iterator<Item = &'a Block>, styles: &wordcraft_doc::styles::StyleSheet) -> bool {
+    let mut image = false;
+    for block in blocks {
+        let Block::Para(p) = block else { return false };
+        if p.text.chars().any(|c| c != '\u{fffc}' && !c.is_whitespace())
+            || styles.resolve_para(&p.props).numbering.is_some_and(|n| n.num != 0)
+            || p.objects.iter().any(|o| !matches!(o, wordcraft_doc::InlineObject::Image { ole: None, .. }))
+        {
+            return false;
+        }
+        image |= !p.objects.is_empty();
+    }
+    image
+}
+
+fn insert_saved(s: &mut Session, _: &Value) -> CmdResult {
+    let state = s.last_paste.clone().ok_or_else(|| CmdError::Failed("there is no recent paste".into()))?;
+    if state.mode == "text" {
+        let text = state.text.clone().unwrap_or_else(|| match state.source.as_ref() {
+            PasteSource::Internal(f) => f.plain_text(),
+            PasteSource::Imported(d) => d.plain_text(wordcraft_doc::StoryRef::Body),
+            PasteSource::Text(t) => t.clone(),
+        });
+        s.pending_move = None;
+        super::paste_text(s, &text.replace(wordcraft_doc::para::OBJ, "").replace('\n', "\r"))?;
+    } else {
+        let styles = match state.source.as_ref() {
+            PasteSource::Imported(d) => &d.styles,
+            _ => &state.before_doc.styles,
+        };
+        let mut frag = match state.source.as_ref() {
+            PasteSource::Internal(f) => f.clone(),
+            PasteSource::Imported(d) => adopt(s, d.as_ref().clone()),
+            PasteSource::Text(t) => Fragment::from_text(t),
+        };
+        let at = s.sel.ordered().0;
+        let para = s.doc.para_at(&at).map(|p| p.props.clone()).unwrap_or_default();
+        let dest = s.doc.styles.resolve_char(para.style.as_deref(), &s.typing_props());
+        let mut format = |p: &mut Paragraph| {
+            for c in p.runs.iter_mut().map(|r| &mut r.props).chain(std::iter::once(&mut p.mark)) {
+                let source = styles.resolve_char(p.props.style.as_deref(), c);
+                let target = if state.mode == "merge" { &dest } else { &source };
+                c.font = Some(target.font.clone());
+                c.font_cs = Some(target.font_cs.clone());
+                c.font_ea = Some(target.font_ea.clone().unwrap_or_else(|| target.font.clone()));
+                c.size = Some(target.size);
+                c.size_cs = Some(target.size_cs);
+                c.color = Some(target.color);
+                c.bold = Some(source.bold);
+                c.italic = Some(source.italic);
+                c.bold_cs = Some(source.bold_cs);
+                c.italic_cs = Some(source.italic_cs);
+                // Explicit defaults prevent a same-named destination style leaking into the copy.
+                c.underline = Some(source.underline);
+                c.underline_color = source.underline_color;
+                c.strike = Some(source.strike);
+                c.double_strike = Some(source.double_strike);
+                c.vert_align = Some(source.vert_align);
+                c.caps = Some(source.caps);
+                c.small_caps = Some(source.small_caps);
+                c.hidden = Some(source.hidden);
+                c.spacing = Some(source.spacing);
+                c.scale = Some(source.scale);
+                c.position = Some(source.position);
+                c.outline = Some(source.outline);
+                c.shadow = Some(source.shadow);
+                c.emboss = Some(source.emboss);
+                c.engrave = Some(source.engrave);
+                c.no_proof = Some(source.no_proof);
+                c.rtl = Some(source.rtl);
+                c.cs = Some(source.cs);
+                c.lang = source.lang;
+                c.shading = source.shading;
+                c.border = Some(source.border.unwrap_or_default());
+                c.text_effects = source.text_effects;
+                c.highlight = wordcraft_doc::props::Highlight::ALL.into_iter().find(|h| h.rgb() == source.highlight);
+            }
+            if state.mode == "merge" {
+                let numbering = p.props.numbering;
+                p.props = para.clone();
+                if numbering.is_some() {
+                    p.props.numbering = numbering;
+                }
+            } else {
+                let source = styles.resolve_para(&p.props);
+                p.props.align = Some(source.align);
+                p.props.indent_left = Some(source.indent_left);
+                p.props.indent_right = Some(source.indent_right);
+                p.props.indent_first = Some(source.indent_first);
+                let [left, right, first] = source.indent_chars;
+                p.props.indent_left_chars = Some(left);
+                p.props.indent_right_chars = Some(right);
+                p.props.indent_first_chars = Some(first);
+                p.props.space_before = Some(source.space_before);
+                p.props.space_after = Some(source.space_after);
+                p.props.line_spacing = Some(source.line_spacing);
+                p.props.contextual_spacing = Some(source.contextual_spacing);
+                p.props.mirror_indents = Some(source.mirror_indents);
+                p.props.keep_next = Some(source.keep_next);
+                p.props.keep_lines = Some(source.keep_lines);
+                p.props.page_break_before = Some(source.page_break_before);
+                p.props.widow_control = Some(source.widow_control);
+                p.props.outline_level = Some(source.outline_level.unwrap_or(9));
+                p.props.numbering = Some(source.numbering.unwrap_or(wordcraft_doc::props::NumRef { num: 0, level: 0 }));
+                p.props.tabs = Some(source.tabs);
+                p.props.shading = source.shading;
+                p.props.borders = Some(source.borders.unwrap_or_default());
+                p.props.bidi = Some(source.bidi);
+                p.props.drop_cap = Some(source.drop_cap);
+                p.props.suppress_hyphens = Some(source.suppress_hyphens);
+                p.props.suppress_line_numbers = Some(source.suppress_line_numbers);
+                p.props.kinsoku = Some(source.kinsoku);
+                p.props.word_wrap = Some(source.word_wrap);
+                p.props.overflow_punct = Some(source.overflow_punct);
+                p.props.top_line_punct = Some(source.top_line_punct);
+                p.props.auto_space_de = Some(source.auto_space_de);
+                p.props.auto_space_dn = Some(source.auto_space_dn);
+                p.props.snap_to_grid = Some(source.snap_to_grid);
+            }
+            p.touch();
+        };
+        for b in &mut frag.blocks {
+            each_para(b, 0, &mut format);
+        }
+        for part in frag.parts.values_mut() {
+            for b in &mut part.blocks {
+                each_para(Arc::make_mut(b), 0, &mut format);
+            }
+        }
+        // A whole empty destination paragraph can keep the source paragraph style/list.
+        // Inline pastes retain the surrounding paragraph, as insert_fragment does.
+        super::controls::prepare_edit(s)?;
+        let at = delete_selection(s)?;
+        if let Some(Block::Para(first)) = frag.blocks.first()
+            && s.doc.para_at(&at).is_some_and(|p| p.is_empty())
+        {
+            s.doc.para_mut(at.story, &at.path)?.props = first.props.clone();
+        }
+        insert(s, frag)?;
+        s.pending = None;
+    }
+    let mut result = sel_result(s)?;
+    result["mode"] = json!(state.mode);
+    result["rich"] = json!(state.rich);
+    Ok(result)
+}
+
+pub fn options(s: &mut Session, v: &Value) -> CmdResult {
+    let mode = match p::str(v, "mode") {
+        Some("source") => "source",
+        Some("merge") => "merge",
+        Some("text") => "text",
+        _ => return Err(CmdError::Params("`mode` must be source, merge or text".into())),
+    };
+    if !s.paste_options_valid() {
+        return Err(CmdError::Failed("there is no recent paste".into()));
+    }
+    let mut state = s.last_paste.clone().ok_or_else(|| CmdError::Failed("there is no recent paste".into()))?;
+    state.mode = if state.rich { mode } else { "text" };
+    s.doc = state.before_doc.clone();
+    s.sel = state.before_sel.clone();
+    s.pending = state.before_pending.clone();
+    s.column = state.before_column.clone();
+    s.pending_move = state.before_move.clone();
+    s.last_paste = Some(state);
+    super::column::dispatch(s, "edit.paste", true, insert_saved, v)
+}
 
 /// Largest clipboard payload Paste Special accepts, in bytes.
 pub const MAX_PASTE_BYTES: usize = 16 << 20;
@@ -36,7 +362,7 @@ pub fn specs() -> Vec<CommandSpec> {
 fn clip_text(s: &Session, v: &Value) -> Option<String> {
     match p::str(v, "text") {
         Some(t) => Some(t.replace("\r\n", "\n")),
-        None => s.clipboard.as_ref().map(Fragment::plain_text),
+        None => s.clipboard.as_ref().filter(|f| check_fragment(f).is_ok()).map(Fragment::plain_text),
     }
 }
 
@@ -55,6 +381,7 @@ fn source(s: &Session, v: &Value, fmt: &str) -> Option<String> {
     match fmt {
         "formatted" => {
             let f = s.clipboard.as_ref()?;
+            check_fragment(f).ok()?;
             // System clipboard text that isn't our own copy means someone else copied since.
             match p::str(v, "text") {
                 Some(t) if f.plain_text() != t.replace("\r\n", "\n") => None,
@@ -109,19 +436,24 @@ fn paste_special(s: &mut Session, v: &Value) -> CmdResult {
             format!("the clipboard has no {fmt} content (available: {})", ids.join(", "))
         }));
     };
-    let frag = match fmt {
-        "text" => {
-            super::paste_text(s, &src.replace("\r\n", "\r").replace('\n', "\r"))?;
-            let mut r = sel_result(s)?;
-            r["pastedAs"] = json!(fmt);
-            return Ok(r);
-        }
-        "formatted" => s.clipboard.clone().ok_or_else(|| CmdError::Failed("the clipboard is empty".into()))?,
-        "html" => adopt(s, wordcraft_formats::html::import(&src)),
-        _ => adopt(s, wordcraft_formats::rtf::import(src.as_bytes()).map_err(|e| CmdError::Failed(format!("bad RTF: {e}")))?),
+    let mut r = match fmt {
+        "text" => normal(s, v, "text")?,
+        "formatted" => normal(s, &json!({}), "source")?,
+        "html" => save_source(
+            s,
+            PasteSource::Imported(Box::new(wordcraft_formats::html::import(&src))),
+            p::str(v, "text").map(str::to_string),
+            "source",
+            v,
+        )?,
+        _ => save_source(
+            s,
+            PasteSource::Imported(Box::new(wordcraft_formats::rtf::import(src.as_bytes()).map_err(|e| CmdError::Failed(format!("bad RTF: {e}")))?)),
+            p::str(v, "text").map(str::to_string),
+            "source",
+            v,
+        )?,
     };
-    insert(s, frag)?;
-    let mut r = sel_result(s)?;
     r["pastedAs"] = json!(fmt);
     Ok(r)
 }

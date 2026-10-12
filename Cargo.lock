@@ -5001,6 +5001,7 @@ name = "wordcraft"
 version = "0.5.0"
 dependencies = [
  "arboard",
+ "clipboard-win",
  "eframe",
  "egui",
  "fmv-macos-events",

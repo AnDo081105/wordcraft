@@ -705,3 +705,27 @@ fn plain_text_paste_keeps_an_empty_paragraph_in_a_list() {
     typ(&mut s, "A\n\nB");
     assert_eq!(paras(&s), vec![para("A", Some(0)), para("B", None)]);
 }
+
+#[test]
+fn typing_after_paste_option_switch_uses_final_format_and_its_own_undo() {
+    let mut s = s();
+    run(&mut s, "edit.paste", json!({"html":"<p><b>rich</b></p>", "text":"rich"}));
+    run(&mut s, "edit.pasteOptions", json!({"mode":"text"}));
+    typ(&mut s, "xy");
+    assert_eq!(texts(&s), ["richxy"]);
+    assert_ne!(s.doc.para_at(&s.sel.focus).unwrap().props_of_char(4).bold, Some(true));
+    assert!(s.run("edit.pasteOptions", &json!({"mode":"source"})).is_err());
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!(texts(&s), ["rich"]);
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!(texts(&s), [""]);
+}
+
+#[test]
+fn typing_after_source_paste_inherits_source_emphasis() {
+    let mut s = s();
+    s.pending = Some(wordcraft_doc::props::CharProps { bold: Some(false), ..Default::default() });
+    run(&mut s, "edit.paste", json!({"html":"<p><b>rich</b></p>", "text":"rich"}));
+    typ(&mut s, "x");
+    assert_eq!(s.doc.para_at(&s.sel.focus).unwrap().props_of_char(4).bold, Some(true));
+}

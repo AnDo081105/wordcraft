@@ -3867,3 +3867,215 @@ fn format_font_sets_the_asian_and_latin_fonts_separately() {
     assert_eq!(fonts(&s), before);
     assert!(s.run("format.font", &json!({})).is_err() && s.run("format.font", &json!({"eastAsia": " "})).is_err());
 }
+
+#[test]
+fn paste_options_replaces_from_original_and_is_one_undo() {
+    let mut s = s();
+    run(&mut s, "text.insert", json!({"text":"replace"}));
+    run(&mut s, "select.all", json!({}));
+    run(&mut s, "edit.paste", json!({"html":"<p><b>rich</b></p>","text":"rich"}));
+    assert_eq!(text(&s), "rich");
+    s.clipboard = Some(wordcraft_doc::edit::Fragment::from_text("unrelated"));
+    run(&mut s, "edit.pasteOptions", json!({"mode":"text"}));
+    assert_eq!(text(&s), "rich");
+    run(&mut s, "edit.pasteOptions", json!({"mode":"source"}));
+    assert_eq!(text(&s), "rich");
+    assert_eq!(s.doc.para_at(&s.sel.focus).unwrap().props_of_char(0).bold, Some(true));
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!(text(&s), "replace");
+    run(&mut s, "edit.redo", json!({}));
+    assert_eq!(text(&s), "rich");
+}
+
+#[test]
+fn paste_merge_adopts_destination_but_preserves_emphasis_and_link() {
+    let mut s = s();
+    s.pending = Some(wordcraft_doc::props::CharProps { font: Some("Destination".into()), size: Some(19.0), ..Default::default() });
+    run(
+        &mut s,
+        "edit.pasteMerge",
+        json!({"html":"<p><a href='https://example.org'><b><i style='font-family:Source;font-size:30pt'>rich</i></b></a></p>","text":"rich"}),
+    );
+    let c = s.doc.para_at(&s.sel.focus).unwrap().props_of_char(0);
+    assert_eq!(c.font.as_deref(), Some("Destination"));
+    assert_eq!(c.size, Some(19.0));
+    assert_eq!(c.bold, Some(true));
+    assert_eq!(c.italic, Some(true));
+    assert_eq!(c.link.as_deref(), Some("https://example.org"));
+}
+
+#[test]
+fn paste_options_invalid_or_stale_preserve_document() {
+    let mut s = s();
+    run(&mut s, "edit.paste", json!({"text":"safe"}));
+    run(&mut s, "edit.pasteOptions", json!({"mode":"text"}));
+    assert!(s.run("edit.pasteOptions", &json!({"mode":"unknown"})).is_err());
+    assert_eq!(text(&s), "safe");
+    run(&mut s, "caret.left", json!({}));
+    assert!(s.run("edit.pasteOptions", &json!({"mode":"source"})).is_err());
+    assert_eq!(text(&s), "safe");
+}
+
+#[test]
+fn paste_options_tracks_and_rejects_protected_switch() {
+    let mut s = s();
+    s.doc.settings.track_changes = true;
+    run(&mut s, "edit.paste", json!({"html":"<p><b>tracked</b></p>","text":"tracked"}));
+    run(&mut s, "edit.pasteOptions", json!({"mode":"text"}));
+    let c = s.doc.para_at(&s.sel.focus).unwrap().props_of_char(0);
+    assert!(c.ins.is_some());
+    s.doc.settings.protection = Some("readOnly".into());
+    assert!(s.run("edit.pasteOptions", &json!({"mode":"source"})).is_err());
+    assert_eq!(text(&s), "tracked");
+}
+
+#[test]
+fn paste_options_keeps_structure_until_text_mode() {
+    let mut s = s();
+    run(&mut s, "edit.paste", json!({"html":"<ul><li><b>item</b></li></ul><table><tr><td>cell</td></tr></table>"}));
+    run(&mut s, "edit.pasteOptions", json!({"mode":"merge"}));
+    assert!(s.doc.body.iter().any(|b| matches!(b.as_ref(), wordcraft_doc::Block::Table(_))));
+    assert!(!s.doc.numbering.nums.is_empty());
+    run(&mut s, "edit.pasteOptions", json!({"mode":"text"}));
+    assert!(s.doc.body.iter().all(|b| matches!(b.as_ref(), wordcraft_doc::Block::Para(_))));
+    assert!(text(&s).contains("item"));
+    assert!(text(&s).contains("cell"));
+}
+
+#[test]
+fn paste_prefers_matching_internal_fragment_over_external_html() {
+    let mut s = s();
+    run(&mut s, "text.insert", json!({"text":"owned"}));
+    run(&mut s, "select.all", json!({}));
+    run(&mut s, "format.italic", json!({}));
+    run(&mut s, "edit.copy", json!({}));
+    run(&mut s, "edit.paste", json!({"html":"<p><b>owned</b></p>", "text":"owned"}));
+    let c = s.doc.para_at(&s.sel.focus).unwrap().props_of_char(0);
+    assert_eq!(c.italic, Some(true));
+    run(&mut s, "edit.pasteOptions", json!({"mode":"text"}));
+    run(&mut s, "edit.pasteOptions", json!({"mode":"source"}));
+    assert_eq!(s.doc.para_at(&s.sel.focus).unwrap().props_of_char(0).italic, Some(true));
+}
+
+#[test]
+fn paste_options_direct_selection_and_mutation_cannot_rewrite_old_paste() {
+    let mut s = s();
+    run(&mut s, "edit.paste", json!({"text":"safe"}));
+    run(&mut s, "edit.pasteOptions", json!({"mode":"text"}));
+    s.sel.focus.off = 0;
+    s.sel.anchor = s.sel.focus.clone();
+    assert!(s.run("edit.pasteOptions", &json!({"mode":"text"})).is_err());
+    assert_eq!(text(&s), "safe");
+    run(&mut s, "edit.paste", json!({"text":"new"}));
+    run(&mut s, "text.insert", json!({"text":"!"}));
+    assert!(s.run("edit.pasteOptions", &json!({"mode":"source"})).is_err());
+    assert_eq!(text(&s), "New!safe");
+}
+
+#[test]
+fn paste_rtf_fallback_and_size_limit_are_safe() {
+    let mut s = s();
+    run(&mut s, "edit.paste", json!({"rtf":r"{\rtf1\ansi {\b bold}}", "text":"bold"}));
+    assert_eq!(s.doc.para_at(&s.sel.focus).unwrap().props_of_char(0).bold, Some(true));
+    run(&mut s, "edit.pasteOptions", json!({"mode":"text"}));
+    run(&mut s, "edit.paste", json!({"rtf":"broken", "text":"fallback"}));
+    assert!(text(&s).ends_with("fallback"));
+    assert!(!s.status.is_empty(), "a rich-format fallback should be visible");
+    let before = text(&s);
+    assert!(s.run("edit.paste", &json!({"text":"x".repeat((16 << 20) + 1)})).is_err());
+    assert_eq!(text(&s), before);
+}
+
+#[test]
+fn paste_source_keeps_style_derived_font_when_pasted_into_other_style() {
+    let mut s = s();
+    run(&mut s, "edit.paste", json!({"html":"<h1>heading</h1>"}));
+    let source =
+        s.doc.styles.resolve_char(s.doc.para_at(&s.sel.focus).unwrap().props.style.as_deref(), s.doc.para_at(&s.sel.focus).unwrap().props_of_char(0));
+    run(&mut s, "select.all", json!({}));
+    run(&mut s, "edit.copy", json!({}));
+    run(&mut s, "para.normal", json!({}));
+    run(&mut s, "edit.paste", json!({"text":"heading"}));
+    let p = s.doc.para_at(&s.sel.focus).unwrap();
+    let pasted = s.doc.styles.resolve_char(p.props.style.as_deref(), p.props_of_char(0));
+    assert_eq!(pasted.font, source.font);
+    assert_eq!(pasted.size, source.size);
+    assert_eq!(pasted.bold, source.bold);
+}
+
+#[test]
+fn oversized_internal_clipboard_does_not_block_an_external_paste() {
+    let mut s = s();
+    s.clipboard = Some(wordcraft_doc::edit::Fragment::from_text(&"x".repeat((16 << 20) + 1)));
+    run(&mut s, "edit.paste", json!({"text":"safe external"}));
+    assert_eq!(text(&s), "safe external");
+}
+
+#[test]
+fn paste_special_options_replace_the_chosen_paste_in_one_undo() {
+    let mut s = s();
+    run(&mut s, "edit.pasteSpecial", json!({"as":"html", "html":"<p><b>chosen</b></p>", "text":"chosen"}));
+    run(&mut s, "edit.pasteOptions", json!({"mode":"text"}));
+    assert_eq!(text(&s), "chosen");
+    assert_ne!(s.doc.para_at(&s.sel.focus).unwrap().props_of_char(0).bold, Some(true));
+    run(&mut s, "edit.pasteOptions", json!({"mode":"source"}));
+    assert_eq!(s.doc.para_at(&s.sel.focus).unwrap().props_of_char(0).bold, Some(true));
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!(text(&s), "");
+}
+
+#[test]
+fn paste_accepts_html_with_plain_prefix() {
+    let mut s = s();
+    run(&mut s, "edit.paste", json!({"html":"normal <b>bold</b>", "text":"normal bold"}));
+    assert_eq!(text(&s), "normal bold");
+    assert_eq!(s.doc.para_at(&s.sel.focus).unwrap().props_of_char(7).bold, Some(true));
+}
+
+#[test]
+fn text_paste_uses_supplied_plain_representation_and_retains_rich_source() {
+    let mut s = s();
+    run(&mut s, "edit.pasteText", json!({"html":"<p><b>rich version</b></p>", "text":"plain version"}));
+    assert_eq!(text(&s), "plain version");
+    run(&mut s, "edit.pasteOptions", json!({"mode":"source"}));
+    assert_eq!(text(&s), "rich version");
+}
+
+#[test]
+fn source_paste_does_not_inherit_colliding_destination_style() {
+    let mut s = s();
+    let normal = s.doc.styles.get_mut("Normal").unwrap();
+    normal.chr.underline = Some(wordcraft_doc::props::Underline::Single);
+    normal.chr.strike = Some(true);
+    normal.chr.spacing = Some(12.0);
+    normal.para.space_after = Some(99.0);
+    run(&mut s, "edit.paste", json!({"html":"<p>plain</p>", "text":"plain"}));
+    let p = s.doc.para_at(&s.sel.focus).unwrap();
+    let c = s.doc.styles.resolve_char(p.props.style.as_deref(), p.props_of_char(0));
+    assert_eq!(c.underline, wordcraft_doc::props::Underline::None);
+    assert!(!c.strike);
+    assert_eq!(c.spacing, 0.0);
+    assert_ne!(s.doc.styles.resolve_para(&p.props).space_after, 99.0);
+}
+
+#[test]
+fn image_only_internal_paste_preserves_pending_and_has_no_text_options() {
+    for (command, images) in [("edit.paste", 2), ("edit.pasteMerge", 2), ("edit.pasteText", 1)] {
+        let mut s = s();
+        run(&mut s, "insert.icon", json!({"id":"heart"}));
+        run(&mut s, "select.range", json!({"anchor":Pos::body(0,0), "focus":Pos::body(0,3)}));
+        run(&mut s, "edit.copy", json!({}));
+        run(&mut s, "caret.docEnd", json!({}));
+        let pending = wordcraft_doc::props::CharProps { font: Some("Destination".into()), size: Some(23.0), ..Default::default() };
+        s.pending = Some(pending.clone());
+        let undo = s.undo_depth();
+        run(&mut s, command, json!({}));
+        assert!(s.last_paste.is_none(), "{command}: picture-only paste has no text options");
+        assert_eq!(s.pending, Some(pending.clone()));
+        assert_eq!(s.doc.para_at(&s.sel.focus).unwrap().objects.len(), images);
+        assert_eq!(s.undo_depth(), undo + 1);
+        run(&mut s, "edit.undo", json!({}));
+        assert_eq!(s.doc.para_at(&s.sel.focus).unwrap().objects.len(), 1);
+        assert_eq!(s.pending, Some(pending));
+    }
+}

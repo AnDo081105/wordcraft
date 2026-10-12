@@ -48,6 +48,7 @@ pub mod mini_toolbar;
 pub mod objects;
 pub mod options;
 pub mod panes;
+pub mod paste_options;
 pub mod paste_picture;
 pub mod previews;
 pub mod print_page;
@@ -100,6 +101,8 @@ pub struct Services {
     /// Desktop: the text on the system clipboard, if any. Ctrl+V gets it from egui's paste event;
     /// the ribbon and context-menu Paste read it here (#584).
     pub clipboard_text: Option<Box<dyn Fn() -> Option<String>>>,
+    /// Desktop: a single snapshot of text and supported HTML/RTF clipboard formats.
+    pub clipboard_rich: Option<Box<dyn Fn() -> Option<Value>>>,
     /// Web: keep a font the user added (stored file name, original bytes) for the next visit
     /// (#582). Desktop fonts are stored by the font database itself, in the app's font folder.
     pub store_font: Option<Box<dyn Fn(&str, &[u8])>>,
@@ -252,6 +255,7 @@ pub struct WordApp {
     pub ui: UiState,
     pub services: Services,
     pub canvas: canvas::CanvasState,
+    pub paste_options: paste_options::State,
     /// Content control frames, check boxes and lists on the page.
     pub controls: content_controls::ControlUi,
     pub dialog: Option<dialogs::Dialog>,
@@ -352,6 +356,7 @@ impl WordApp {
             ui: UiState::default(),
             services,
             canvas: canvas::CanvasState::default(),
+            paste_options: paste_options::State::default(),
             controls: Default::default(),
             dialog: None,
             colors: None,
@@ -471,26 +476,32 @@ impl WordApp {
         // The ribbon and context-menu Paste commands send no text: read the system clipboard's, as
         // Ctrl+V's paste event carries it (#584).
         let mut params = params;
+        let system_paste = id == "edit.paste" && params.get("text").is_none() && params.get("html").is_none() && params.get("rtf").is_none();
+        paste_options::clipboard_params(self, id, &mut params);
         if matches!(id, "edit.paste" | "edit.pasteText" | "edit.pasteMerge" | "edit.pasteSpecial")
             && params.get("text").is_none()
+            && params.get("html").is_none()
+            && params.get("rtf").is_none()
             && let Some(text) = self.services.clipboard_text.as_ref().and_then(|f| f()).filter(|t| !t.is_empty())
             && let Some(o) = params.as_object_mut()
         {
-            // Picture files copied in a file manager reach us as their paths: paste the pictures,
-            // as Ctrl+V does.
-            if id == "edit.paste"
-                && self.session.math.is_none()
-                && paste_picture::names_picture_files(&text)
-                && let Some(r) = paste_picture::paste(self)
-            {
-                return r;
-            }
             o.insert("text".into(), Value::String(text));
+        }
+        // File-manager image paths retain picture-paste precedence with either clipboard reader.
+        if id == "edit.paste"
+            && self.session.math.is_none()
+            && params.get("html").is_none()
+            && params.get("rtf").is_none()
+            && params.get("text").and_then(Value::as_str).is_some_and(paste_picture::names_picture_files)
+            && let Some(r) = paste_picture::paste(self)
+        {
+            return r;
         }
         // Paste without system clipboard text: a picture there is newer than our own copy (copying
         // here replaces it with text), so it wins (#45).
         if id == "edit.paste"
             && params.get("text").is_none()
+            && (system_paste || (params.get("html").is_none() && params.get("rtf").is_none()))
             && let Some(r) = paste_picture::paste(self)
         {
             return r;
@@ -574,6 +585,11 @@ impl WordApp {
         }
         let document = self.session.document_id();
         let r = self.session.run(id, &params).map_err(|e| e.to_string());
+        if r.is_ok() && matches!(id, "edit.paste" | "edit.pasteMerge" | "edit.pasteText" | "edit.pasteSpecial") {
+            self.paste_options.open = false;
+            self.paste_options.focus_selected(self.session.last_paste.as_ref().map(|p| p.mode).unwrap_or("source"));
+            self.paste_options.focus_pending = false;
+        }
         // When the document has been replaced (not when Open only showed its picker), a pending
         // "Save changes?" and AutoSave's go-ahead were both about the old one.
         if self.session.document_id() != document {
@@ -775,6 +791,26 @@ impl WordApp {
     fn ui_command(&mut self, id: &str, p: &Value) -> Option<Result<Value, String>> {
         let s = |k: &str| p.get(k).and_then(Value::as_str);
         Some(Ok(match id {
+            "ui.pasteOptions" => {
+                if !self.session.paste_options_valid() {
+                    return Some(Err("there is no recent paste to format".into()));
+                }
+                self.paste_options.open = p.get("value").and_then(Value::as_bool).unwrap_or(true);
+                self.paste_options.focus_selected(self.session.last_paste.as_ref().map(|p| p.mode).unwrap_or("source"));
+                self.paste_options.focus_pending = self.paste_options.open;
+                if !self.paste_options.open {
+                    self.canvas.want_focus = true;
+                }
+                json!({"open": self.paste_options.open})
+            }
+            "ui.dismissPasteOptions" => {
+                if self.paste_options.open {
+                    self.canvas.want_focus = true;
+                }
+                self.session.last_paste = None;
+                self.paste_options.open = false;
+                json!({"open": false})
+            }
             "ui.tab" => {
                 let tab = s("tab").unwrap_or("Home").to_string();
                 if tab == "File" {
@@ -1200,6 +1236,7 @@ impl WordApp {
         // Keytips are read before layout so the frame paints the new state; badges paint after
         // the ribbon so they sit on top of it.
         crate::keytips::logic(self, &ctx);
+        paste_options::keyboard(self, &ctx);
         if self.ui.backstage {
             backstage::show(self, ui);
         } else {

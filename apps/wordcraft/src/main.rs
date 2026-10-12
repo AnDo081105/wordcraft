@@ -17,6 +17,7 @@ mod file_dialogs;
 mod graphics;
 mod logging;
 mod print;
+mod rich_clipboard;
 
 use wordcraft_engine::Session;
 use wordcraft_ui_egui::{
@@ -141,6 +142,7 @@ fn services(file_dialog: file_dialogs::Hook) -> Services {
         print: Some(print::hook()),
         clipboard_picture: Some(Box::new(clipboard_picture)),
         clipboard_text: Some(Box::new(|| arboard::Clipboard::new().ok()?.get_text().ok())),
+        clipboard_rich: Some(Box::new(rich_clipboard::read)),
         ..Default::default()
     }
 }
