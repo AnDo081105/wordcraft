@@ -3869,6 +3869,73 @@ fn format_font_sets_the_asian_and_latin_fonts_separately() {
 }
 
 #[test]
+fn default_paste_applies_only_to_ordinary_paste() {
+    for mode in ["source", "merge", "text"] {
+        for (command, expected) in [("edit.paste", mode), ("edit.pasteMerge", "merge"), ("edit.pasteText", "text")] {
+            let mut s = s();
+            let result = run(&mut s, "file.options", json!({"defaultPaste": mode}));
+            assert_eq!(result["defaultPaste"], mode);
+            assert_eq!(result["opened"], false);
+            assert!(s.ui_requests.is_empty());
+            s.pending = Some(wordcraft_doc::props::CharProps { font: Some("Destination".into()), size: Some(19.0), ..Default::default() });
+            run(&mut s, command, json!({"html":"<p><b style='font-family:Source;font-size:30pt'>rich</b></p>","text":"rich"}));
+            assert_eq!(s.last_paste.as_ref().unwrap().mode, expected);
+            let c = s.doc.para_at(&s.sel.focus).unwrap().props_of_char(s.sel.focus.off.saturating_sub(1));
+            assert_eq!(c.bold == Some(true), expected != "text");
+            assert_eq!(c.font.as_deref(), Some(if expected == "source" { "Source" } else { "Destination" }));
+            assert_eq!(c.size, Some(if expected == "source" { 30.0 } else { 19.0 }));
+        }
+        let mut s = s();
+        run(&mut s, "file.options", json!({"defaultPaste": mode}));
+        let before = s.prefs.clone();
+        for invalid in [json!("unknown"), json!(7), json!(true), json!([])] {
+            assert!(s.run("file.options", &json!({"defaultPaste":invalid,"overtype":true})).is_err());
+            assert_eq!(s.prefs, before);
+        }
+        assert!(s.run("file.options", &json!({"defaultPaste":"merge", "overtype":"invalid"})).is_err());
+        assert_eq!(s.prefs, before);
+    }
+}
+
+#[test]
+fn default_paste_preferences_round_trip_and_validate_modes() {
+    use crate::cmd::paste::PasteMode;
+    assert_eq!(crate::Prefs::default().default_paste, PasteMode::Source);
+    for mode in [PasteMode::Source, PasteMode::Merge, PasteMode::Text] {
+        let prefs = crate::Prefs { default_paste: mode, ..Default::default() };
+        let saved = serde_json::to_value(&prefs).unwrap();
+        assert_eq!(saved["defaultPaste"], mode.code());
+        assert_eq!(serde_json::from_value::<crate::Prefs>(saved).unwrap(), prefs);
+    }
+    for invalid in [json!("unknown"), json!(7), json!(true), json!([]), json!(null)] {
+        assert!(serde_json::from_value::<crate::Prefs>(json!({"defaultPaste":invalid,"overtype":true})).is_err());
+    }
+    assert_eq!(serde_json::from_value::<crate::Prefs>(json!({})).unwrap().default_paste, PasteMode::Source);
+}
+
+#[test]
+fn default_paste_does_not_override_special_or_clipboard_items() {
+    for mode in ["merge", "text"] {
+        for (command, params) in
+            [("edit.pasteSpecial", json!({"as":"formatted"})), ("edit.pasteClipboardItem", json!({"index":0})), ("edit.pasteAllClipboard", json!({}))]
+        {
+            let mut s = s();
+            run(&mut s, "edit.paste", json!({"html":"<p><b style='font-family:Source;font-size:30pt'>rich</b></p>","text":"rich"}));
+            run(&mut s, "select.all", json!({}));
+            run(&mut s, "edit.copy", json!({}));
+            run(&mut s, "caret.docEnd", json!({}));
+            s.pending = Some(wordcraft_doc::props::CharProps { font: Some("Destination".into()), bold: Some(false), ..Default::default() });
+            run(&mut s, "file.options", json!({"defaultPaste":mode}));
+            run(&mut s, command, params);
+            assert_eq!(text(&s), "richrich");
+            let props = s.doc.para_at(&s.sel.focus).unwrap().props_of_char(4);
+            assert_eq!(props.font.as_deref(), Some("Source"), "{command} under {mode}");
+            assert_eq!(props.bold, Some(true));
+        }
+    }
+}
+
+#[test]
 fn paste_options_replaces_from_original_and_is_one_undo() {
     let mut s = s();
     run(&mut s, "text.insert", json!({"text":"replace"}));
@@ -4060,8 +4127,15 @@ fn source_paste_does_not_inherit_colliding_destination_style() {
 
 #[test]
 fn image_only_internal_paste_preserves_pending_and_has_no_text_options() {
-    for (command, images) in [("edit.paste", 2), ("edit.pasteMerge", 2), ("edit.pasteText", 1)] {
+    for (command, mode, images) in [
+        ("edit.paste", "source", 2),
+        ("edit.paste", "merge", 2),
+        ("edit.paste", "text", 2),
+        ("edit.pasteMerge", "text", 2),
+        ("edit.pasteText", "source", 1),
+    ] {
         let mut s = s();
+        run(&mut s, "file.options", json!({"defaultPaste":mode}));
         run(&mut s, "insert.icon", json!({"id":"heart"}));
         run(&mut s, "select.range", json!({"anchor":Pos::body(0,0), "focus":Pos::body(0,3)}));
         run(&mut s, "edit.copy", json!({}));

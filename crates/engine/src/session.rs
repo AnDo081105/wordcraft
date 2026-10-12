@@ -356,6 +356,8 @@ pub struct Prefs {
     pub insert_key_overtype: bool,
     /// Overtype: typed characters replace the ones after the caret.
     pub overtype: bool,
+    /// Formatting ordinary Paste uses.
+    pub default_paste: crate::cmd::paste::PasteMode,
     /// The unit rulers and dialogs show lengths in.
     pub units: wordcraft_geom::Unit,
     /// Formatting marks shown even while Show/Hide ¶ is off.
@@ -380,6 +382,7 @@ impl Default for Prefs {
             typing_replaces_selection: true,
             insert_key_overtype: false,
             overtype: false,
+            default_paste: Default::default(),
             units: Default::default(),
             marks: Default::default(),
             mark_grammar: true,

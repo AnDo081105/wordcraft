@@ -8,12 +8,33 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use wordcraft_doc::edit::Fragment;
 use wordcraft_doc::{Block, Document, Paragraph};
 
 use super::{delete_selection, sel_result};
 use crate::{CmdError, CmdResult, ColumnBlock, CommandSpec, Selection, Session, p};
+
+/// Formatting used by ordinary Paste; explicit paste commands choose their own mode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PasteMode {
+    #[default]
+    Source,
+    Merge,
+    Text,
+}
+
+impl PasteMode {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Merge => "merge",
+            Self::Text => "text",
+        }
+    }
+}
 
 /// The most recent paste, retained independently of subsequent clipboard changes.
 #[derive(Clone, Debug)]
@@ -120,9 +141,11 @@ fn normal_source(s: &Session, v: &Value) -> Result<(PasteSource, bool), CmdError
     Err(CmdError::Failed(if fallback { "the rich clipboard content could not be read" } else { "the clipboard is empty" }.into()))
 }
 
-/// Normal source, merge and text paste all retain the same original source.
-pub fn normal(s: &mut Session, v: &Value, mode: &'static str) -> CmdResult {
+/// Normal source, merge and text paste all retain the same original source. No explicit mode
+/// uses the preference, except picture-only content remains a picture.
+pub fn normal(s: &mut Session, v: &Value, mode: Option<&'static str>) -> CmdResult {
     let (source, fallback) = normal_source(s, v)?;
+    let mode = mode.unwrap_or_else(|| if source_images_only(&source, s) { "source" } else { s.prefs.default_paste.code() });
     let result = save_source(s, source, p::str(v, "text").map(|t| t.replace("\r\n", "\n")), mode, v)?;
     if fallback {
         s.status = "Rich clipboard content could not be read; pasted an available fallback.".into();
@@ -130,13 +153,16 @@ pub fn normal(s: &mut Session, v: &Value, mode: &'static str) -> CmdResult {
     Ok(result)
 }
 
-fn save_source(s: &mut Session, source: PasteSource, text: Option<String>, mode: &'static str, v: &Value) -> CmdResult {
-    let image_only = match &source {
+fn source_images_only(source: &PasteSource, s: &Session) -> bool {
+    match source {
         PasteSource::Internal(f) => f.parts.is_empty() && images_only(f.blocks.iter(), &s.doc.styles),
         PasteSource::Imported(d) => d.parts.is_empty() && images_only(d.body.iter().map(AsRef::as_ref), &d.styles),
         PasteSource::Text(_) => false,
-    };
-    if image_only {
+    }
+}
+
+fn save_source(s: &mut Session, source: PasteSource, text: Option<String>, mode: &'static str, v: &Value) -> CmdResult {
+    if source_images_only(&source, s) {
         s.dismiss_paste();
         if mode == "text" {
             let text = text.unwrap_or_else(|| match &source {
@@ -437,8 +463,8 @@ fn paste_special(s: &mut Session, v: &Value) -> CmdResult {
         }));
     };
     let mut r = match fmt {
-        "text" => normal(s, v, "text")?,
-        "formatted" => normal(s, &json!({}), "source")?,
+        "text" => normal(s, v, Some("text"))?,
+        "formatted" => normal(s, &json!({}), Some("source"))?,
         _ => {
             let doc = if fmt == "html" {
                 wordcraft_formats::html::import(&src)

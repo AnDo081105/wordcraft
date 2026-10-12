@@ -33,13 +33,13 @@ pub fn specs() -> Vec<CommandSpec> {
         .pure(),
         CommandSpec::new("edit.cut", "Cut", "Home › Clipboard", cut).key("Mod+X").when(has_sel),
         CommandSpec::new("edit.copy", "Copy", "Home › Clipboard", copy).key("Mod+C").pure(),
-        CommandSpec::new("edit.paste", "Paste", "Home › Clipboard", |s, v| super::paste::normal(s, v, "source"))
+        CommandSpec::new("edit.paste", "Paste", "Home › Clipboard", |s, v| super::paste::normal(s, v, None))
             .key("Mod+V")
             .params(r#"{"text"?: string, "html"?: string, "rtf"?: string}"#),
-        CommandSpec::new("edit.pasteText", "Paste: Keep Text Only", "Home › Clipboard › Paste", |s, v| super::paste::normal(s, v, "text"))
+        CommandSpec::new("edit.pasteText", "Paste: Keep Text Only", "Home › Clipboard › Paste", |s, v| super::paste::normal(s, v, Some("text")))
             .params(r#"{"text"?: string, "html"?: string, "rtf"?: string}"#)
             .key("Mod+Shift+Alt+V"),
-        CommandSpec::new("edit.pasteMerge", "Paste: Merge Formatting", "Home › Clipboard › Paste", |s, v| super::paste::normal(s, v, "merge"))
+        CommandSpec::new("edit.pasteMerge", "Paste: Merge Formatting", "Home › Clipboard › Paste", |s, v| super::paste::normal(s, v, Some("merge")))
             .params(r#"{"text"?: string, "html"?: string, "rtf"?: string}"#),
         CommandSpec::new("edit.pasteOptions", "Paste Options", "Home › Clipboard › Paste", super::paste::options)
             .params(r#"{"mode": "source"|"merge"|"text"}"#),
@@ -251,7 +251,7 @@ fn clip_index(s: &Session, v: &Value) -> Result<usize, CmdError> {
 /// Paste a collected item through the normal paste path. The clipboard itself stays as it was.
 fn paste_clip(s: &mut Session, f: Fragment) -> CmdResult {
     let saved = s.clipboard.replace(f);
-    let r = super::paste::normal(s, &json!({}), "source");
+    let r = super::paste::normal(s, &json!({}), Some("source"));
     s.clipboard = saved;
     r
 }

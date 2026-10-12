@@ -256,6 +256,7 @@ pub struct WordApp {
     pub services: Services,
     pub canvas: canvas::CanvasState,
     pub paste_options: paste_options::State,
+    pub(crate) default_paste_pending: bool,
     /// Content control frames, check boxes and lists on the page.
     pub controls: content_controls::ControlUi,
     pub dialog: Option<dialogs::Dialog>,
@@ -357,6 +358,7 @@ impl WordApp {
             services,
             canvas: canvas::CanvasState::default(),
             paste_options: paste_options::State::default(),
+            default_paste_pending: false,
             controls: Default::default(),
             dialog: None,
             colors: None,
@@ -810,6 +812,17 @@ impl WordApp {
                 self.session.last_paste = None;
                 self.paste_options.open = false;
                 json!({"open": false})
+            }
+            "ui.setDefaultPaste" => {
+                if let Err(error) = self.run("file.options", json!({"pane": "advanced"})) {
+                    return Some(Err(error));
+                }
+                self.paste_options.open = false;
+                self.paste_options.focus_pending = false;
+                self.canvas.focused = false;
+                self.canvas.want_focus = false;
+                self.default_paste_pending = true;
+                json!({"pane": "advanced", "section": "paste"})
             }
             "ui.tab" => {
                 let tab = s("tab").unwrap_or("Home").to_string();

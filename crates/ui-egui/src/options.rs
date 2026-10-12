@@ -296,6 +296,30 @@ fn advanced(app: &mut WordApp, ui: &mut Ui) {
     flag(app, ui, "Use the Insert key to switch overtype on and off", "insertKeyOvertype", pr.insert_key_overtype);
     flag(app, ui, "Overtype (typing replaces the characters after the caret)", "overtype", pr.overtype);
     ui.add_space(8.0);
+    section(ui, "Cut, copy, and paste");
+    ui.horizontal(|ui| {
+        use wordcraft_engine::cmd::paste::PasteMode;
+        let modes = [(PasteMode::Source, "Keep Source Formatting"), (PasteMode::Merge, "Merge Formatting"), (PasteMode::Text, "Keep Text Only")];
+        ui.label(tl!("Default paste mode:"));
+        let label = modes.iter().find(|(mode, _)| *mode == pr.default_paste).map_or("Keep Source Formatting", |(_, label)| *label);
+        let response = egui::ComboBox::from_id_salt("options_default_paste")
+            .selected_text(tl!(label))
+            .width(220.0)
+            .show_ui(ui, |ui| {
+                for (mode, label) in modes {
+                    if ui.selectable_label(pr.default_paste == mode, tl!(label)).clicked() {
+                        set(app, json!({"defaultPaste": mode.code()}));
+                    }
+                }
+            })
+            .response;
+        if app.default_paste_pending {
+            response.scroll_to_me(Some(egui::Align::Center));
+            response.request_focus();
+            app.default_paste_pending = false;
+        }
+    });
+    ui.add_space(8.0);
     section(ui, "Display");
     egui::Grid::new("options_display").num_columns(2).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
         ui.label(tl!("Recent documents to show:"));
@@ -460,7 +484,7 @@ mod tests {
         let mut a = app();
         a.run(
             "file.options",
-            json!({"initials": "VK", "units": "centimeters", "typingReplacesSelection": false, "marks": {"tabs": true}, "ignoreNumbers": false, "addWords": ["zqxoptionsword"]}),
+            json!({"initials": "VK", "units": "centimeters", "defaultPaste": "merge", "typingReplacesSelection": false, "marks": {"tabs": true}, "ignoreNumbers": false, "addWords": ["zqxoptionsword"]}),
         )
         .unwrap();
         a.ui.recent_count = 30;
@@ -470,17 +494,19 @@ mod tests {
         b.apply_prefs(UiState::from_json(&saved).unwrap());
         assert_eq!(b.session.prefs, a.session.prefs);
         assert_eq!(b.session.prefs.units, Unit::Centimeters);
+        assert_eq!(wordcraft_engine::cmd::options::current(&b.session)["defaultPaste"], "merge");
         assert_eq!(b.session.initials, "VK");
         assert_eq!((b.ui.recent_count, b.ui.print_backgrounds), (30, true));
         assert!(wordcraft_engine::proof::user_dictionary().contains(&"zqxoptionsword".to_string()));
 
         let junk = br#"{"theme": "dark", "recentCount": "lots", "printBackgrounds": 7, "optionsPane": ["x"], "dark": true,
-            "editing": {"units": "furlongs", "typingReplacesSelection": false, "marks": {"tabs": "yes", "spaces": true}}}"#;
+            "editing": {"units": "furlongs", "defaultPaste": "invalid", "typingReplacesSelection": false, "marks": {"tabs": "yes", "spaces": true}}}"#;
         let ui = UiState::from_json(junk).unwrap();
         assert_eq!(ui.theme, Appearance::Dark);
         assert_eq!((ui.recent_count, ui.print_backgrounds, ui.options_pane.as_str()), (12, false, "general"));
         assert_eq!(ui.legacy_dark, Some(true));
         assert_eq!(ui.editing.units, Unit::Inches);
+        assert_eq!(ui.editing.default_paste.code(), "source");
         assert!(!ui.editing.typing_replaces_selection);
         assert!(ui.editing.marks.spaces && !ui.editing.marks.tabs);
         assert!(UiState::from_json(b"[1, 2]").is_none() && UiState::from_json(b"not json").is_none());
@@ -517,5 +543,37 @@ mod tests {
         h.run_steps(2);
         assert!(!h.state().session.prefs.typing_replaces_selection);
         assert!(h.query_by_label("Measurement units:").is_some());
+    }
+
+    #[test]
+    fn default_paste_dropdown_changes_only_future_pastes() {
+        let mut a = app();
+        a.run("edit.paste", json!({"html": "<b>rich</b>", "text": "rich"})).unwrap();
+        let before = a.session.doc.clone();
+        let selection = a.session.sel.clone();
+        a.run("ui.setDefaultPaste", json!({})).unwrap();
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1000.0, 700.0)).build_ui_state(
+            |ui, app: &mut WordApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            a,
+        );
+        h.run_steps(6);
+        assert!(!h.state().default_paste_pending);
+        assert!(h.ctx.memory(|m| m.focused()).is_some());
+        h.event(egui::Event::Text("z".into()));
+        h.run_steps(2);
+        h.event(egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+        h.run_steps(3);
+        h.get_by_label("Merge Formatting").click();
+        h.run_steps(3);
+        assert_eq!(h.state().session.prefs.default_paste.code(), "merge");
+        assert_eq!(h.state().session.doc, before);
+        assert_eq!(h.state().session.sel, selection);
+        assert!(h.state().session.last_paste.is_some());
+        h.state_mut().run("edit.undo", json!({})).unwrap();
+        assert_eq!(h.state().session.doc.plain_text(wordcraft_doc::StoryRef::Body), "");
     }
 }

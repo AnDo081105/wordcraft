@@ -159,6 +159,7 @@ pub fn keyboard(app: &mut WordApp, ctx: &egui::Context) {
     }
     let mut handled = Vec::new();
     let mut mode = None;
+    let mut settings = false;
     for event in events {
         if let Event::Key { key, pressed: true, modifiers, .. } = event {
             if !modifiers.is_none() && !(key == Key::Tab && modifiers.shift_only()) {
@@ -170,21 +171,27 @@ pub fn keyboard(app: &mut WordApp, ctx: &egui::Context) {
                 handled.push(key);
             } else if app.paste_options.open {
                 match key {
-                    Key::ArrowLeft | Key::ArrowUp => app.paste_options.focus = (app.paste_options.focus + 2) % 3,
-                    Key::Tab if modifiers.shift => app.paste_options.focus = (app.paste_options.focus + 2) % 3,
-                    Key::ArrowRight | Key::ArrowDown | Key::Tab => app.paste_options.focus = (app.paste_options.focus + 1) % 3,
-                    Key::Enter | Key::Space => mode = OPTIONS.get(app.paste_options.focus).map(|o| o.0),
+                    Key::ArrowLeft | Key::ArrowUp | Key::ArrowRight | Key::ArrowDown | Key::Tab => {
+                        let backwards = matches!(key, Key::ArrowLeft | Key::ArrowUp) || (key == Key::Tab && modifiers.shift);
+                        app.paste_options.focus = (app.paste_options.focus + if backwards { 3 } else { 1 }) % 4;
+                        if app.session.last_paste.as_ref().is_none_or(|p| !p.rich) && app.paste_options.focus < 2 {
+                            app.paste_options.focus = if backwards { 3 } else { 2 };
+                        }
+                    }
+                    Key::Enter | Key::Space => {
+                        settings = app.paste_options.focus == 3;
+                        mode = OPTIONS.get(app.paste_options.focus).map(|o| o.0);
+                    }
                     _ => continue,
                 }
                 handled.push(key);
-                if app.session.last_paste.as_ref().is_none_or(|p| !p.rich) {
-                    app.paste_options.focus = 2;
-                }
                 app.paste_options.focus_pending = true;
             }
         }
     }
-    if let Some(mode) = mode {
+    if settings {
+        let _ = app.run("ui.setDefaultPaste", json!({}));
+    } else if let Some(mode) = mode {
         choose(app, mode);
     }
     ctx.input_mut(|i| {
@@ -267,9 +274,9 @@ pub fn show(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) {
     app.paste_options.rect = Some(button);
     if app.paste_options.open {
         let menu_id = egui::Id::new("wc_paste_options_menu");
-        let menu_size = egui::containers::AreaState::load(ctx, menu_id).and_then(|s| s.size).unwrap_or(egui::vec2(110.0, 54.0));
-        let below = button.bottom() + 0.0 + menu_size.y <= viewport.bottom();
-        let position = egui::pos2(button.left(), if below { button.bottom() + 0.0 } else { button.top() - 0.0 });
+        let menu_size = egui::containers::AreaState::load(ctx, menu_id).and_then(|s| s.size).unwrap_or(egui::vec2(170.0, 85.0));
+        let below = button.bottom() + 3.0 + menu_size.y <= viewport.bottom();
+        let position = egui::pos2(button.left(), if below { button.bottom() + 3.0 } else { button.top() - 3.0 });
         let menu = egui::Area::new(menu_id)
             .order(egui::Order::Foreground)
             .pivot(if below { egui::Align2::LEFT_TOP } else { egui::Align2::LEFT_BOTTOM })
@@ -282,12 +289,7 @@ pub fn show(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) {
                     .fill(t.menu)
                     .stroke(egui::Stroke::new(1.0, t.border_strong))
                     .corner_radius(4)
-                    .inner_margin(egui::Margin {
-                        left: 2,
-                        right: 20,
-                        top: 2,
-                        bottom: 2,
-                    })
+                    .inner_margin(egui::Margin { left: 2, right: 20, top: 2, bottom: 2 })
                     .show(ui, |ui| {
                         ui.label(egui::RichText::new(crate::tl!("Paste Options")).font(crate::theme::semibold(12.0)));
                         ui.horizontal(|ui| {
@@ -330,6 +332,24 @@ pub fn show(app: &mut WordApp, ctx: &egui::Context, viewport: Rect) {
                                 });
                             }
                         });
+                        ui.separator();
+                        let response = ui.button(crate::tl!("Set Default Paste…"));
+                        app.paste_options.focus_ids.push(response.id);
+                        if app.paste_options.focus == 3 && app.paste_options.focus_pending {
+                            response.request_focus();
+                            app.paste_options.focus_pending = false;
+                        }
+                        if response.has_focus() {
+                            ui.memory_mut(|m| {
+                                m.set_focus_lock_filter(
+                                    response.id,
+                                    egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true },
+                                )
+                            });
+                        }
+                        if response.clicked() {
+                            let _ = app.run("ui.setDefaultPaste", json!({}));
+                        }
                     })
                     .response
                     .rect
@@ -369,6 +389,61 @@ mod tests {
 
     fn app() -> WordApp {
         WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), crate::Services::default())
+    }
+
+    #[test]
+    fn default_paste_footer_opens_settings_without_rewriting_paste() {
+        use egui_kittest::kittest::Queryable;
+        let mut app = app();
+        app.run("edit.paste", json!({"html":"<b>rich</b>","text":"rich"})).unwrap();
+        let before = app.session.doc.clone();
+        let mut h = harness(app);
+        h.get_by_label("Paste Options").click();
+        h.run_steps(3);
+        h.get_by_label("Set Default Paste…").click();
+        h.run_steps(4);
+        assert!(h.state().ui.backstage);
+        assert_eq!(h.state().ui.backstage_page, "options");
+        assert_eq!(h.state().ui.options_pane, "advanced");
+        assert!(!h.state().paste_options.open);
+        assert!(h.query_by_label("Cut, copy, and paste").is_some());
+        assert_eq!(h.state().session.doc, before);
+    }
+
+    #[test]
+    fn keyboard_reaches_default_paste_footer_for_rich_and_plain_text() {
+        for rich in [true, false] {
+            let mut app = app();
+            app.run("edit.paste", if rich { json!({"html":"<b>rich</b>","text":"rich"}) } else { json!({"text":"plain"}) }).unwrap();
+            let before = app.session.doc.clone();
+            app.run("ui.pasteOptions", json!({})).unwrap();
+            let ctx = egui::Context::default();
+            let mut events = vec![key(Key::Tab, true); if rich { 3 } else { 1 }];
+            events.push(key(Key::Enter, true));
+            ctx.run_ui(egui::RawInput { events, ..Default::default() }, |ui| {
+                keyboard(&mut app, ui.ctx());
+                assert!(ui.input(|i| i.events.is_empty()));
+            })
+            .drop_without_applying_deltas();
+            assert!(app.ui.backstage);
+            assert_eq!(app.ui.options_pane, "advanced");
+            assert_eq!(app.session.doc, before);
+        }
+    }
+
+    #[test]
+    fn menu_navigation_wraps_and_skips_disabled_modes_both_ways() {
+        for rich in [true, false] {
+            let mut app = app();
+            app.run("edit.paste", if rich { json!({"html":"<b>rich</b>","text":"rich"}) } else { json!({"text":"plain"}) }).unwrap();
+            app.run("ui.pasteOptions", json!({})).unwrap();
+            let ctx = egui::Context::default();
+            for (direction, focus) in [(Key::ArrowLeft, 3), (Key::ArrowRight, if rich { 0 } else { 2 }), (Key::ArrowLeft, 3), (Key::ArrowLeft, 2)] {
+                ctx.run_ui(egui::RawInput { events: vec![key(direction, true)], ..Default::default() }, |ui| keyboard(&mut app, ui.ctx()))
+                    .drop_without_applying_deltas();
+                assert_eq!(app.paste_options.focus, focus);
+            }
+        }
     }
 
     #[test]

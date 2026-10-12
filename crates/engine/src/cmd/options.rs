@@ -20,7 +20,7 @@ pub fn specs() -> Vec<CommandSpec> {
     vec![
         CommandSpec::new("file.options", "Options", "File", options)
             .params(
-                r#"{"pane"?: "general|display|proofing|save|language|accessibility|advanced|agents", "author"?: string, "initials"?: string, "units"?: "inches|centimeters|millimeters|points|picas", "typingReplacesSelection"?: bool, "insertKeyOvertype"?: bool, "overtype"?: bool, "marks"?: {"tabs"?: bool, "spaces"?: bool, "paragraphs"?: bool, "hidden"?: bool}, "checkSpelling"?: bool, "markGrammar"?: bool, "ignoreUppercase"?: bool, "ignoreNumbers"?: bool, "ignoreInternet"?: bool, "addWords"?: [string], "removeWords"?: [string]} — with any setting it changes them and opens nothing; without, it opens File › Options (at `pane`). Returns the settings."#,
+                r#"{"pane"?: "general|display|proofing|save|language|accessibility|advanced|agents", "author"?: string, "initials"?: string, "units"?: "inches|centimeters|millimeters|points|picas", "typingReplacesSelection"?: bool, "insertKeyOvertype"?: bool, "overtype"?: bool, "defaultPaste"?: "source|merge|text", "marks"?: {"tabs"?: bool, "spaces"?: bool, "paragraphs"?: bool, "hidden"?: bool}, "checkSpelling"?: bool, "markGrammar"?: bool, "ignoreUppercase"?: bool, "ignoreNumbers"?: bool, "ignoreInternet"?: bool, "addWords"?: [string], "removeWords"?: [string]} — with any setting it changes them and opens nothing; without, it opens File › Options (at `pane`). Returns the settings."#,
             )
             .pure(),
         CommandSpec::new("text.overtype", "Overtype", "File › Options › Advanced", |s, v| {
@@ -100,6 +100,13 @@ fn options(s: &mut Session, v: &Value) -> CmdResult {
                 .map_err(|_| CmdError::Params("`units` is one of inches, centimeters, millimeters, points, picas".into()))?,
         ),
     };
+    let default_paste = match v.get("defaultPaste") {
+        None | Some(Value::Null) => None,
+        Some(mode) => Some(
+            serde_json::from_value::<super::paste::PasteMode>(mode.clone())
+                .map_err(|_| CmdError::Params("`defaultPaste` is one of source, merge, text".into()))?,
+        ),
+    };
     let mut flag_values = Vec::new();
     for (k, f) in flags() {
         if let Some(b) = bool_param(v, k)? {
@@ -125,6 +132,7 @@ fn options(s: &mut Session, v: &Value) -> CmdResult {
     let setting = author.is_some()
         || initials.is_some()
         || units.is_some()
+        || default_paste.is_some()
         || !flag_values.is_empty()
         || !mark_values.is_empty()
         || check_spelling.is_some()
@@ -138,6 +146,9 @@ fn options(s: &mut Session, v: &Value) -> CmdResult {
     }
     if let Some(u) = units {
         s.prefs.units = u;
+    }
+    if let Some(mode) = default_paste {
+        s.prefs.default_paste = mode;
     }
     for (f, b) in flag_values {
         *f(&mut s.prefs) = b;
@@ -177,6 +188,7 @@ pub fn current(s: &Session) -> Value {
         "typingReplacesSelection": pr.typing_replaces_selection,
         "insertKeyOvertype": pr.insert_key_overtype,
         "overtype": pr.overtype,
+        "defaultPaste": pr.default_paste,
         "marks": pr.marks,
         "checkSpelling": s.view.proofing,
         "markGrammar": pr.mark_grammar,

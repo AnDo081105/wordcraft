@@ -729,3 +729,24 @@ fn typing_after_source_paste_inherits_source_emphasis() {
     typ(&mut s, "x");
     assert_eq!(s.doc.para_at(&s.sel.focus).unwrap().props_of_char(4).bold, Some(true));
 }
+
+#[test]
+fn typing_after_default_paste_inherits_chosen_format_and_has_its_own_undo() {
+    for mode in ["source", "merge", "text"] {
+        let mut s = s();
+        run(&mut s, "file.options", json!({"defaultPaste":mode}));
+        s.pending =
+            Some(wordcraft_doc::props::CharProps { font: Some("Destination".into()), size: Some(19.0), bold: Some(false), ..Default::default() });
+        run(&mut s, "edit.paste", json!({"html":"<p><b style='font-family:Source;font-size:30pt'>rich</b></p>","text":"rich"}));
+        typ(&mut s, "x");
+        let props = s.doc.para_at(&s.sel.focus).unwrap().props_of_char(4);
+        assert_eq!(props.font.as_deref(), Some(if mode == "source" { "Source" } else { "Destination" }));
+        assert_eq!(props.bold == Some(true), mode != "text");
+        assert_eq!(texts(&s), ["richx"]);
+        run(&mut s, "edit.undo", json!({}));
+        assert_eq!(texts(&s), ["rich"]);
+        run(&mut s, "edit.undo", json!({}));
+        assert_eq!(texts(&s), [""]);
+        assert_eq!(s.prefs.default_paste.code(), mode);
+    }
+}
