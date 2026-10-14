@@ -1496,6 +1496,8 @@ impl WordApp {
 
     /// Lay out the window.
     pub fn ui(&mut self, ui: &mut egui::Ui) {
+        // Hidden-window logic has stale input; only a UI pass starts a new input frame.
+        self.canvas.begin_input_frame(ui.ctx());
         let t0 = now_ms();
         let ctx = ui.ctx().clone();
         i18n::set_current(i18n::Lang::from_pref(&self.ui.language));

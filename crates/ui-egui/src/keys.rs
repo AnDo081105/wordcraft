@@ -185,7 +185,7 @@ fn equation_key(app: &mut WordApp, key: Key, m: Modifiers) -> bool {
 }
 
 /// Whether releasing `key` with `modifiers` is the plain Paste shortcut (Mod+V or the Paste
-/// key) — not Mod+Shift+V (Paste Formatting) or Mod+Alt+V (Paste Special) — so a clipboard
+/// key) — not Mod+Shift+V (Keep Text Only) or Mod+Alt+V (Paste Special) — so a clipboard
 /// picture may be pasted on it (#45).
 fn is_paste_release(key: Key, modifiers: egui::Modifiers) -> bool {
     (modifiers.command || key == Key::Paste) && !modifiers.alt && !modifiers.shift
@@ -194,6 +194,16 @@ fn is_paste_release(key: Key, modifiers: egui::Modifiers) -> bool {
 /// Whether releasing `key` with `modifiers` is Mod+Alt+V (Paste Special).
 fn is_paste_special_release(key: Key, modifiers: egui::Modifiers) -> bool {
     key == Key::V && modifiers.command && modifiers.alt && !modifiers.shift
+}
+
+fn paste_command(m: Modifiers) -> &'static str {
+    if m.command && m.shift {
+        "edit.pasteText"
+    } else if m.command && m.alt {
+        "edit.pasteSpecial"
+    } else {
+        "edit.paste"
+    }
 }
 
 /// Events for the focused canvas: text, editing keys, clipboard, IME. While keytips are showing
@@ -229,7 +239,13 @@ pub fn canvas_events(app: &mut WordApp, ctx: &egui::Context) {
         }
         return;
     }
+    let mut modifiers = app.canvas.frame_start_modifiers;
     for e in events {
+        match &e {
+            egui::Event::ModifiersChanged(m) | egui::Event::Key { modifiers: m, .. } => modifiers = *m,
+            egui::Event::WindowFocused(false) => modifiers = Modifiers::default(),
+            _ => {}
+        }
         // An Alt shortcut (Alt+Shift+D, Alt+F7…) may also send its key's text; it isn't typed.
         match &e {
             egui::Event::Key { pressed: true, .. } => app.canvas.swallow_text = false,
@@ -239,7 +255,7 @@ pub fn canvas_events(app: &mut WordApp, ctx: &egui::Context) {
         if let egui::Event::Paste(t) = &e {
             app.canvas.pasted = true;
             // Copied picture files arrive as their paths: insert the pictures (#45).
-            if app.session.math.is_none() && !ctx.input(|i| i.modifiers.alt) && crate::paste_picture::paste_named_files(app, t) {
+            if app.session.math.is_none() && paste_command(modifiers) == "edit.paste" && crate::paste_picture::paste_named_files(app, t) {
                 continue;
             }
         }
@@ -305,12 +321,7 @@ pub fn canvas_events(app: &mut WordApp, ctx: &egui::Context) {
             }
             egui::Event::Paste(t) => {
                 // Mod+Alt+V arrives as a paste too (the shell reads the clipboard): Paste Special.
-                let m = ctx.input(|i| i.modifiers);
-                let id = match (m.alt, m.shift) {
-                    (true, true) => "edit.pasteText",
-                    (true, false) => "edit.pasteSpecial",
-                    _ => "edit.paste",
-                };
+                let id = paste_command(modifiers);
                 let _ = app.run(id, json!({"text": t}));
             }
             egui::Event::Copy | egui::Event::Cut => {
@@ -402,6 +413,156 @@ pub fn global_shortcuts(app: &mut WordApp, ctx: &egui::Context) {
 mod tests {
     use super::*;
 
+    fn paste_app() -> WordApp {
+        let mut app = WordApp::new(
+            wordcraft_engine::Session::new(wordcraft_doc::Document::new()),
+            crate::Services {
+                clipboard_text: Some(Box::new(|| Some("external".into()))),
+                clipboard_html: Some(Box::new(|| Some("<p style='font-family:Times New Roman;font-size:10pt'><b>external</b></p>".into()))),
+                clipboard_rtf: Some(Box::new(|| Some(r"{\rtf1\ansi {\b external}}".into()))),
+                ..Default::default()
+            },
+        );
+        app.run("document.setText", json!({"text": "replace"})).unwrap();
+        app.run("select.all", json!({})).unwrap();
+        app.run("format.font", json!({"name": "Arial"})).unwrap();
+        app.run("format.size", json!({"size": 18})).unwrap();
+        app
+    }
+
+    fn paste_frame(app: &mut WordApp, ctx: &egui::Context, events: Vec<egui::Event>, canvas: bool) {
+        ctx.run_ui(egui::RawInput { events, ..Default::default() }, |ui| {
+            app.logic(ui.ctx());
+            // A repeated layout pass must not replace the frame's starting modifiers.
+            app.canvas.begin_input_frame(ui.ctx());
+            app.canvas.begin_input_frame(ui.ctx());
+            if canvas {
+                canvas_events(app, ui.ctx());
+            }
+        })
+        .drop_without_applying_deltas();
+    }
+
+    fn paste_modifiers(mac: bool, alt: bool) -> Modifiers {
+        Modifiers { command: true, ctrl: !mac, mac_cmd: mac, shift: true, alt }
+    }
+
+    #[test]
+    fn keep_text_only_paste_keeps_destination_formatting_on_both_platforms() {
+        for mac in [false, true] {
+            for alt in [false, true] {
+                let mut app = paste_app();
+                let ctx = egui::Context::default();
+                let held = paste_modifiers(mac, alt);
+                paste_frame(
+                    &mut app,
+                    &ctx,
+                    vec![
+                        egui::Event::ModifiersChanged(held),
+                        egui::Event::Paste("external".into()),
+                        egui::Event::ModifiersChanged(Modifiers::default()),
+                    ],
+                    true,
+                );
+                let para = app.session.doc.para_at(&app.session.sel.focus).unwrap();
+                assert_eq!(para.text, "external");
+                assert_eq!(para.props_of_char(0).font.as_deref(), Some("Arial"));
+                assert_eq!(para.props_of_char(0).size, Some(18.0));
+                assert_ne!(para.props_of_char(0).bold, Some(true));
+            }
+        }
+    }
+
+    #[test]
+    fn keep_text_only_paste_remembers_modifiers_while_canvas_is_unfocused() {
+        for mac in [false, true] {
+            let mut app = paste_app();
+            let ctx = egui::Context::default();
+            paste_frame(&mut app, &ctx, vec![egui::Event::ModifiersChanged(paste_modifiers(mac, false))], false);
+            paste_frame(&mut app, &ctx, vec![egui::Event::Paste("external".into()), egui::Event::ModifiersChanged(Modifiers::default())], true);
+            let para = app.session.doc.para_at(&app.session.sel.focus).unwrap();
+            assert_eq!(para.props_of_char(0).font.as_deref(), Some("Arial"));
+        }
+    }
+
+    #[test]
+    fn keep_text_only_shortcuts_insert_text_on_both_platforms() {
+        for mac in [false, true] {
+            for alt in [false, true] {
+                let mut app = paste_app();
+                assert!(dispatch(&mut app, Key::V, paste_modifiers(mac, alt)));
+                let para = app.session.doc.para_at(&app.session.sel.focus).unwrap();
+                assert_eq!(para.text, "external");
+                assert_eq!(para.props_of_char(0).font.as_deref(), Some("Arial"));
+            }
+        }
+    }
+
+    #[test]
+    fn keep_text_only_paste_inserts_picture_paths_as_text() {
+        let mut app = paste_app();
+        app.services.clipboard_picture =
+            Some(Box::new(|| Some(crate::paste_picture::ClipboardPicture::Pixels { width: 1, height: 1, rgba: vec![200; 4] })));
+        let ctx = egui::Context::default();
+        let path = if cfg!(windows) { r"C:\tmp\picture.png" } else { "/tmp/picture.png" };
+        paste_frame(&mut app, &ctx, vec![egui::Event::ModifiersChanged(paste_modifiers(false, false)), egui::Event::Paste(path.into())], true);
+        let para = app.session.doc.para_at(&app.session.sel.focus).unwrap();
+        assert_eq!(para.text, path);
+        assert!(app.session.doc.media.is_empty());
+    }
+
+    #[test]
+    fn ordinary_paste_and_paste_special_keep_their_modes() {
+        for mac in [false, true] {
+            for special in [false, true] {
+                let mut app = paste_app();
+                let ctx = egui::Context::default();
+                let held = Modifiers { shift: false, alt: special, ..paste_modifiers(mac, false) };
+                paste_frame(
+                    &mut app,
+                    &ctx,
+                    vec![
+                        egui::Event::ModifiersChanged(held),
+                        egui::Event::Paste("external".into()),
+                        egui::Event::ModifiersChanged(Modifiers::default()),
+                    ],
+                    true,
+                );
+                let para = app.session.doc.para_at(&app.session.sel.focus).unwrap();
+                if special {
+                    assert_eq!(para.text, "replace");
+                    assert!(matches!(app.dialog, Some(crate::dialogs::Dialog::PasteSpecial { .. })));
+                } else {
+                    assert_eq!(para.text, "external");
+                    assert_eq!(para.props_of_char(0).font.as_deref(), Some("Times New Roman"));
+                    assert_eq!(para.props_of_char(0).bold, Some(true));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn focus_loss_clears_paste_modifiers() {
+        let mut app = paste_app();
+        let ctx = egui::Context::default();
+        paste_frame(&mut app, &ctx, vec![egui::Event::ModifiersChanged(paste_modifiers(false, false))], false);
+        paste_frame(&mut app, &ctx, vec![egui::Event::WindowFocused(false), egui::Event::Paste("external".into())], true);
+        let para = app.session.doc.para_at(&app.session.sel.focus).unwrap();
+        assert_eq!(para.props_of_char(0).font.as_deref(), Some("Times New Roman"));
+    }
+
+    #[test]
+    fn keep_text_only_paste_remembers_modifiers_after_hidden_logic() {
+        let mut app = paste_app();
+        let ctx = egui::Context::default();
+        paste_frame(&mut app, &ctx, Vec::new(), false);
+        let _ = ctx.run_logic(&egui::RawInput::default(), |ctx| app.logic(ctx));
+        paste_frame(&mut app, &ctx, vec![egui::Event::ModifiersChanged(paste_modifiers(false, false))], false);
+        paste_frame(&mut app, &ctx, vec![egui::Event::Paste("external".into())], true);
+        let para = app.session.doc.para_at(&app.session.sel.focus).unwrap();
+        assert_eq!(para.props_of_char(0).font.as_deref(), Some("Arial"));
+    }
+
     #[test]
     fn shift_backspace_still_erases() {
         assert_eq!(shift_variant_params("text.backspace"), Some(json!({})));
@@ -429,7 +590,7 @@ mod tests {
         let m = |command, shift, alt| egui::Modifiers { command, shift, alt, ..Default::default() };
         assert!(is_paste_release(Key::V, m(true, false, false)), "Mod+V");
         assert!(is_paste_release(Key::Paste, m(false, false, false)), "the Paste key");
-        assert!(!is_paste_release(Key::V, m(true, true, false)), "Mod+Shift+V is Paste Formatting");
+        assert!(!is_paste_release(Key::V, m(true, true, false)), "Mod+Shift+V is Keep Text Only");
         assert!(!is_paste_release(Key::V, m(true, false, true)), "Mod+Alt+V is Paste Special");
         assert!(!is_paste_release(Key::V, m(false, false, false)), "a plain V");
         assert!(is_paste_special_release(Key::V, m(true, false, true)), "Mod+Alt+V opens Paste Special");

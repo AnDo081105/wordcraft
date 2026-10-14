@@ -12,6 +12,21 @@ fn s() -> Session {
     Session::new(wordcraft_doc::Document::new())
 }
 
+#[test]
+fn plain_text_paste_replaces_selection_with_destination_font_and_size() {
+    let mut s = s();
+    run(&mut s, "document.setText", json!({"text": "replace"}));
+    run(&mut s, "select.all", json!({}));
+    run(&mut s, "format.font", json!({"name": "Arial"}));
+    run(&mut s, "format.size", json!({"size": 18}));
+    run(&mut s, "edit.pasteText", json!({"text": "A\nB"}));
+    assert_eq!(s.doc.plain_text(StoryRef::Body), "A\nB");
+    for p in s.doc.body.iter().filter_map(|b| b.as_para()) {
+        assert_eq!(p.props_of_char(0).font.as_deref(), Some("Arial"));
+        assert_eq!(p.props_of_char(0).size, Some(18.0));
+    }
+}
+
 fn run(s: &mut Session, id: &str, v: serde_json::Value) {
     s.run(id, &v).unwrap_or_else(|e| panic!("{id}: {e}"));
 }

@@ -120,6 +120,10 @@ pub struct CanvasState {
     pub balloon_rects: Vec<(u32, Rect)>,
     /// A paste event arrived since the last Mod+V release (see `keys::canvas_events`).
     pub(crate) pasted: bool,
+    /// Paste events have no modifiers; replay their changes from the start of the input frame.
+    pub(crate) frame_start_modifiers: egui::Modifiers,
+    pub(crate) last_modifiers: egui::Modifiers,
+    pub(crate) modifiers_frame: Option<u64>,
     /// Draw Table or Eraser is on (`table_pen`): presses draw instead of moving the caret.
     pub table_tool: Option<crate::table_pen::TableTool>,
     /// The Draw Table stroke (or eraser press) in progress.
@@ -138,6 +142,16 @@ pub struct CanvasState {
 }
 
 impl CanvasState {
+    pub(crate) fn begin_input_frame(&mut self, ctx: &egui::Context) {
+        // Layout may repeat a frame; keep the modifier state from before its first pass.
+        let frame = ctx.cumulative_frame_nr();
+        if self.modifiers_frame != Some(frame) {
+            self.frame_start_modifiers = self.last_modifiers;
+            self.last_modifiers = ctx.input(|i| i.modifiers);
+            self.modifiers_frame = Some(frame);
+        }
+    }
+
     /// The cached rendering of a page.
     pub(crate) fn page_texture(&self, page: usize) -> Option<&TextureHandle> {
         self.textures.get(&page).map(|(_, t)| t)
@@ -192,6 +206,9 @@ impl Default for CanvasState {
             context_menu_at: None,
             mini_anchor: None,
             pasted: false,
+            frame_start_modifiers: egui::Modifiers::default(),
+            last_modifiers: egui::Modifiers::default(),
+            modifiers_frame: None,
             swallow_text: false,
             wheel: Default::default(),
             scroll_offset: egui::Vec2::ZERO,
